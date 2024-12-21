@@ -30,16 +30,16 @@ test = ["Test"]
 julia = "1.7 - 1.12"
 
 # Combinatorics: v0.7.0 から v1.x まで対応OKにしてみる (例)
-Combinatorics = "0.7, 1"
+# Combinatorics = "0.7, 1.2"
 
 # AdmittanceModels は 0.2.0 が入る想定なので、パッチ版まではOKという書き方
-AdmittanceModels = "0.2"
+# AdmittanceModels = "0.2"
 
 # Documenter は 0.27 以降〜1.x までを許容(例)
 Documenter = "0.27 - 1"
 
 # StaticArrays は 1.0〜1.x 系をざっくり許容 (0.12も許容するなら "0.12 - 1" など)
-StaticArrays = "1 - 1.9"
+# StaticArrays = "1 - 1.9"
 
 # MatrixNetworks, UniqueVectors は実際のリリース状況に合わせて設定
 # ここでは仮で "0.1 - 1" というように幅を持たせた例
