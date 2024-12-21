@@ -9,7 +9,7 @@ version = "0.1.1"  # 例: パッチバージョンを上げておく
 # Combinatorics = "861a8166-3701-5b0c-9a16-15d98fcdc6aa"
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
 MatrixNetworks = "4f449596-a032-5618-b826-5a251cb6dc11"
-# StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 UniqueVectors = "2fbcfb34-fd0c-5fbb-b5d7-e826d8f5b0a9"
 
 # --- 以下は標準ライブラリ(LinearAlgebra, SparseArrays, Statistics) ---
@@ -39,7 +39,7 @@ julia = "1.7 - 1.12"
 Documenter = "0.27 - 1"
 
 # StaticArrays は 1.0〜1.x 系をざっくり許容 (0.12も許容するなら "0.12 - 1" など)
-# StaticArrays = "1 - 1.9"
+StaticArrays = "1 - 2"
 
 # MatrixNetworks, UniqueVectors は実際のリリース状況に合わせて設定
 # ここでは仮で "0.1 - 1" というように幅を持たせた例
