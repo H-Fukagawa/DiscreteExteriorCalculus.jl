@@ -6,10 +6,10 @@ version = "0.1.1"  # 例: パッチバージョンを上げておく
 [deps]
 # --- 以下は外部パッケージ(General Registry等にある想定) ---
 AdmittanceModels = "5eda1363-42a2-4d75-bc45-7e2a4a7b92b2"
-Combinatorics = "861a8166-3701-5b0c-9a16-15d98fcdc6aa"
+# Combinatorics = "861a8166-3701-5b0c-9a16-15d98fcdc6aa"
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
 MatrixNetworks = "4f449596-a032-5618-b826-5a251cb6dc11"
-StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+# StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 UniqueVectors = "2fbcfb34-fd0c-5fbb-b5d7-e826d8f5b0a9"
 
 # --- 以下は標準ライブラリ(LinearAlgebra, SparseArrays, Statistics) ---
