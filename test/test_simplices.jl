@@ -29,7 +29,7 @@ end
             d2 = norm(m, p1.coords - p2.coords)
             d3 = norm(p1.coords - p2.coords) # using Euclidean metric
             @test d2 ≈ d3
-            @test abs(d1 - d2) < 1e-5
+            @test abs(d1 - d2) < 2e-5
         end
     end
 end

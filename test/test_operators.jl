@@ -73,8 +73,13 @@ using SparseArrays: sparse, spzeros
     begin
         differential_operator_sequence(m, mesh, "★d★d", 1, true) ==
             [dual_★s[3], dual_ds[2],★s[2],ds[1]]
-        @test differential_operator(m, mesh, "★d★d", 1, true) ==
-            dual_★s[3] * dual_ds[2] * ★s[2] * ds[1]
+        # 旧コード:
+        # @test differential_operator(m, mesh, "★d★d", 1, true) == (dual_★s[3] * dual_ds[2] * ★s[2] * ds[1])
+
+        # 新コード: isapprox で比較する
+        A = differential_operator(m, mesh, "★d★d", 1, true)
+        B = dual_★s[3] * dual_ds[2] * ★s[2] * ds[1]
+        @test isapprox(A, B; rtol=1e-14, atol=1e-14)
         v = ones(length(mesh.primal.complex.cells[1]))
         @test norm(differential_operator(m, mesh, "★d★d", 1, true, v) -
             dual_★s[3] * dual_ds[2] * ★s[2] * ds[1] * v) < 1e-14

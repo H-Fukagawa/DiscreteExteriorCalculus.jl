@@ -27,7 +27,7 @@ test = ["Test"]
 
 [compat]
 # Julia 本体のバージョン。1.7 以降であればそこそこ新しい依存パッケージとも合いやすい。
-julia = "1.7 - 1.9"
+julia = "1.7 - 1.12"
 
 # Combinatorics: v0.7.0 から v1.x まで対応OKにしてみる (例)
 Combinatorics = "0.7, 1"
