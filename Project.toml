@@ -44,4 +44,4 @@ StaticArrays = "1 - 2"
 # MatrixNetworks, UniqueVectors は実際のリリース状況に合わせて設定
 # ここでは仮で "0.1 - 1" というように幅を持たせた例
 MatrixNetworks = "0.1 - 1"
-UniqueVectors = "0.3 - 1"
+UniqueVectors = "0.3 - 1.2"
