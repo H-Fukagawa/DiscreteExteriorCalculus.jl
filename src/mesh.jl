@@ -131,3 +131,54 @@ function dual(mesh::Mesh{N, K}, c::Cell{N}) where {N, K}
     i = findfirst(isequal(c), comp1.cells[c.K])
     return comp2.cells[K-c.K+1][i]
 end
+
+
+
+export dual2
+"""
+    dual2(primal::CellComplex{N, K}, center::Function) where {N, K}
+
+Compute the dual TriangulatedComplex of a simplicial complex. `center` is a function that
+takes a `Simplex{N, K}` to a `Barycentric{N, K}`.
+
+Returns:
+  - `dual_tcomp`: The dual TriangulatedComplex.
+  - `primal_to_duals`: A dictionary mapping each primal Cell to its corresponding dual Cell.
+"""
+function dual2(primal::CellComplex{N, K}, center::Function) where {N, K}
+    dual_tcomp = TriangulatedComplex{N, K}()  # Empty dual triangulated complex
+    primal_to_elementary_duals = Dict{Cell{N}, Vector{Tuple{SimpleBarySimplex{N}, Bool}}}()
+    primal_to_duals = Dict{Cell{N}, Cell{N}}()  # Primal -> Dual mapping
+
+    # Iterate from high dimensions to low dimensions
+    for k in reverse(1:K)
+        for cell in primal.cells[k]
+            # 1) Compute elementary dual simplices for the current primal cell
+            elementary_duals = elementary_duals!(primal_to_elementary_duals, center, cell)
+            signed_elementary_duals = [(SimpleSimplex(p[1]), p[2]) for p in elementary_duals]
+
+            # 2) Extract unique points for the dual cell
+            points = unique(vcat([p[1].points for p in signed_elementary_duals]...))
+            dual_cell = Cell(points, K-k+1)  # Create the dual cell with the correct dimension
+
+            # 3) Add the dual cell to the dual triangulated complex
+            push!(dual_tcomp.complex, dual_cell)
+            dual_tcomp.simplices[dual_cell] = signed_elementary_duals
+
+            # 4) Record the mapping from the primal cell to its dual cell
+            primal_to_duals[cell] = dual_cell
+
+            # 5) Connect dual cells with parent relationships
+            for parent in keys(cell.parents)
+                o = cell.parents[parent]
+                dual_child = primal_to_duals[parent]
+                # Ensure the dual mesh is positively oriented
+                parent!(dual_child, dual_cell, k == 1 ? !o : o)
+            end
+        end
+    end
+
+    # Return both the dual triangulated complex and the primal-to-dual mapping
+    return dual_tcomp, primal_to_duals
+end
+
