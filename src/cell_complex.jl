@@ -5,7 +5,7 @@ using Combinatorics: combinations
 Cell(points::AbstractVector{Point{N}}, K::Int) where N = Cell{N}(Cell{N}[],
     Dict{Cell{N}, Bool}(), Vector(points), K)
 
-Cell(s::Simplex{N, K}) where {N, K} = Cell(s.points, K)
+Cell(s::Simplex{N, K}) where {N, K} = Cell(s.points, K - 1)
 
 import Base: show
 show(io::IO, c::Cell{N}) where N = print(io,
