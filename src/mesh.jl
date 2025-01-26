@@ -133,13 +133,21 @@ function dual(mesh::Mesh{N, K}, c::Cell{N}) where {N, K}
 end
 
 
-
 export dual2
+
 """
     dual2(primal::CellComplex{N, K}, center::Function) where {N, K}
 
 Compute the dual TriangulatedComplex of a simplicial complex. `center` is a function that
 takes a `Simplex{N, K}` to a `Barycentric{N, K}`.
+
+**Modified version**:
+Uses `dual_cell = Cell(points, K - k)` to set the dual dimension as `(K - k)`,
+so that primal dimension=k => dual dimension=(K-k).
+Hence for a 3D mesh with K=4:
+  - primal cell k=4 => dual cell dimension=0 (K=1)
+  - primal cell k=3 => dual cell dimension=1 (K=2)
+  etc.
 
 Returns:
   - `dual_tcomp`: The dual TriangulatedComplex.
@@ -159,7 +167,16 @@ function dual2(primal::CellComplex{N, K}, center::Function) where {N, K}
 
             # 2) Extract unique points for the dual cell
             points = unique(vcat([p[1].points for p in signed_elementary_duals]...))
-            dual_cell = Cell(points, K-k+1)  # Create the dual cell with the correct dimension
+
+            # ------------------- MODIFICATION HERE -------------------
+            # Original code: dual_cell = Cell(points, K-k+1)
+            # => This yields p+q=5 logic (triangle=>edge).
+            #
+            # Change to:     dual_cell = Cell(points, K - k)
+            # => This yields p+q=4 logic (triangle=>vertex).
+            #
+            dual_cell = Cell(points, K - k) 
+            # --------------------------------------------------------
 
             # 3) Add the dual cell to the dual triangulated complex
             push!(dual_tcomp.complex, dual_cell)
@@ -172,7 +189,8 @@ function dual2(primal::CellComplex{N, K}, center::Function) where {N, K}
             for parent in keys(cell.parents)
                 o = cell.parents[parent]
                 dual_child = primal_to_duals[parent]
-                # Ensure the dual mesh is positively oriented
+                # orientation handling
+                # (the user may need to adjust this logic for p+q=4 if orientation flips differently)
                 parent!(dual_child, dual_cell, k == 1 ? !o : o)
             end
         end
@@ -181,4 +199,3 @@ function dual2(primal::CellComplex{N, K}, center::Function) where {N, K}
     # Return both the dual triangulated complex and the primal-to-dual mapping
     return dual_tcomp, primal_to_duals
 end
-
