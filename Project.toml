@@ -25,7 +25,7 @@ julia = "1.6 - 1.12"
 
 # 依存パッケージの互換バージョン (現在の安定版を想定した例)
 # 【重要】AdmittanceModels が v0.3.0 に更新されたと仮定
-AdmittanceModels = "0.3"
+# AdmittanceModels = "0.3"
 Combinatorics = "1"
 MatrixNetworks = "1"      # 要注意: 更新が止まっている可能性
 StaticArrays = "1"
