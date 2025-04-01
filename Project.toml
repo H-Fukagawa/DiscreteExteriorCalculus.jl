@@ -1,20 +1,19 @@
 name = "DiscreteExteriorCalculus"
 uuid = "0a3a9624-8642-11e9-0f42-fd2a0d40ec72"
 authors = ["Michael Scheer <mgscheer@gmail.com>"]
-version = "0.1.1"  # 例: パッチバージョンを上げておく
+version = "0.1.2"  # パッチバージョンを上げました
 
 [deps]
 # --- 以下は外部パッケージ(General Registry等にある想定) ---
 AdmittanceModels = "5eda1363-42a2-4d75-bc45-7e2a4a7b92b2"
 Combinatorics = "861a8166-3701-5b0c-9a16-15d98fcdc6aa"
+Compat = "34da2185-b29b-5c13-b0c7-acf172513d20"  # 追加: Compatを明示的に依存関係に追加
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
 MatrixNetworks = "4f449596-a032-5618-b826-5a251cb6dc11"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 UniqueVectors = "2fbcfb34-fd0c-5fbb-b5d7-e826d8f5b0a9"
 
 # --- 以下は標準ライブラリ(LinearAlgebra, SparseArrays, Statistics) ---
-#   Julia v1.3以降では、標準ライブラリをdepsに書くかどうかは任意ですが
-#   外すと必要な際にエラーになることもあるため、このまま残しておく例。
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
@@ -26,22 +25,18 @@ Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 test = ["Test"]
 
 [compat]
-# Julia 本体のバージョン。1.7 以降であればそこそこ新しい依存パッケージとも合いやすい。
-julia = "1.7 - 1.12"
+# Julia本体のバージョン制約を緩和
+julia = "1.7 - 1.11"
 
-# Combinatorics: v0.7.0 から v1.x まで対応OKにしてみる (例)
-Combinatorics = "0.7 - 1.2"
+# AdmittanceModelsのバージョン制約を緩和
+AdmittanceModels = "0.1, 0.2"
 
-# AdmittanceModels は 0.2.0 が入る想定なので、パッチ版まではOKという書き方
-AdmittanceModels = "0.2"
+# Compatを追加し、幅広いバージョンを許容
+Compat = "2.1, 2.2, 3, 4"
 
-# Documenter は 0.27 以降〜1.x までを許容(例)
-Documenter = "0.27 - 1"
-
-# StaticArrays は 1.0〜1.x 系をざっくり許容 (0.12も許容するなら "0.12 - 1" など)
-StaticArrays = "1 - 2"
-
-# MatrixNetworks, UniqueVectors は実際のリリース状況に合わせて設定
-# ここでは仮で "0.1 - 1" というように幅を持たせた例
+# その他の依存パッケージのバージョン制約
+Combinatorics = "0.7, 1.0"
+Documenter = "0.22, 0.27 - 1"
+StaticArrays = "0.11, 1.0 - 2"
 MatrixNetworks = "0.1 - 1"
 UniqueVectors = "0.3 - 1.2"
