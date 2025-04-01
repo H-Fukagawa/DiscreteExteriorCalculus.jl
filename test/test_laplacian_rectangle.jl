@@ -1,3 +1,6 @@
+#=
+無効化　AdmittanceModels: sparse_nullbasisを使いたくないので。
+
 using Test, DiscreteExteriorCalculus
 const DEC = DiscreteExteriorCalculus
 using LinearAlgebra: eigen
@@ -65,3 +68,5 @@ if false # set to true to make heatmap plots of modes
     using PlotlyJS: plot, heatmap
     plot(heatmap(z=vs[1]))
 end
+
+=#
