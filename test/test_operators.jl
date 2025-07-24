@@ -97,3 +97,132 @@ using SparseArrays: sparse, spzeros
         end
     end
 end
+
+@testset "barycentric_hodge and corrected_barycentric_hodge" begin
+    # setup - same as above
+    begin
+        m = Metric(2)
+        n = 5  # smaller for faster testing
+        _, tcomp = DEC.triangulated_lattice(n * [1,0], n * [.5, .5 * sqrt(3)], n, n)
+        comp = tcomp.complex
+        mesh = Mesh(tcomp, circumcenter(m))
+        N, K = 2, 3
+    end
+    
+    # test barycentric_hodge basic functionality
+    @testset "barycentric_hodge basic tests" begin
+        for k in 1:K+1
+            for primal in [true, false]
+                try
+                    hodge = DEC.barycentric_hodge(m, mesh, k, primal)
+                    @test isa(hodge, AbstractMatrix)
+                    @test size(hodge, 1) == size(hodge, 2)
+                    
+                    # Check sparsity structure
+                    if k <= K
+                        expected_size = primal ? 
+                            length(mesh.dual.complex.cells[K-k+1]) :
+                            length(mesh.primal.complex.cells[K-k+1])
+                        @test size(hodge, 1) == expected_size
+                    end
+                catch e
+                    if k == K+1
+                        @test isa(e, AssertionError) || size(hodge) == (0,0)
+                    else
+                        rethrow(e)
+                    end
+                end
+            end
+        end
+    end
+    
+    # test corrected_barycentric_hodge
+    @testset "corrected_barycentric_hodge tests" begin
+        for k in 1:K
+            for primal in [true, false]
+                # Test with default options
+                hodge_corrected = DEC.corrected_barycentric_hodge(m, mesh, k, primal)
+                hodge_basic = DEC.barycentric_hodge(m, mesh, k, primal)
+                
+                @test isa(hodge_corrected, AbstractMatrix)
+                @test size(hodge_corrected) == size(hodge_basic)
+                
+                # Test with selective corrections
+                hodge_dg = DEC.corrected_barycentric_hodge(m, mesh, k, primal; 
+                                                         use_direct_gradient=true, 
+                                                         use_cross_diffusion=false)
+                hodge_cd = DEC.corrected_barycentric_hodge(m, mesh, k, primal; 
+                                                         use_direct_gradient=false, 
+                                                         use_cross_diffusion=true)
+                hodge_none = DEC.corrected_barycentric_hodge(m, mesh, k, primal; 
+                                                           use_direct_gradient=false, 
+                                                           use_cross_diffusion=false)
+                
+                @test isapprox(hodge_none, hodge_basic; rtol=1e-12)
+                @test size(hodge_dg) == size(hodge_basic)
+                @test size(hodge_cd) == size(hodge_basic)
+            end
+        end
+    end
+    
+    # test correction functions individually
+    @testset "correction functions" begin
+        k = 2  # test with 1-forms
+        primal = true
+        
+        # Test direct gradient correction
+        dg_correction = DEC.direct_gradient_correction(m, mesh, k, primal)
+        @test isa(dg_correction, AbstractMatrix)
+        
+        # Test cross diffusion correction  
+        cd_correction = DEC.cross_diffusion_correction(m, mesh, k, primal)
+        @test isa(cd_correction, AbstractMatrix)
+        
+        # Check dimensions match
+        base_hodge = DEC.barycentric_hodge(m, mesh, k, primal)
+        @test size(dg_correction) == size(base_hodge)
+        @test size(cd_correction) == size(base_hodge)
+    end
+    
+    # test helper functions
+    @testset "helper functions" begin
+        k = 2
+        primal = true
+        comp = mesh.primal.complex
+        
+        if length(comp.cells[k]) > 1
+            cell1 = comp.cells[k][1]
+            cell2 = comp.cells[k][2]
+            
+            # Test geometric relationship check
+            rel = DEC.has_geometric_relationship(cell1, cell2, k, K)
+            @test isa(rel, Bool)
+            
+            # Test shared boundary measure
+            measure = DEC.compute_shared_boundary_measure(cell1, cell2, k)
+            @test isa(measure, Float64)
+            @test measure >= 0.0
+            
+            # Test neighboring cells
+            neighbors = DEC.get_neighboring_cells(cell1, comp, k)
+            @test isa(neighbors, Vector)
+        end
+    end
+    
+    # comparison with circumcenter hodge
+    @testset "comparison with circumcenter_hodge" begin
+        for k in 1:K
+            circumcenter_hodge_op = DEC.circumcenter_hodge(m, mesh, k, true)
+            barycentric_hodge_op = DEC.barycentric_hodge(m, mesh, k, true)
+            corrected_hodge_op = DEC.corrected_barycentric_hodge(m, mesh, k, true)
+            
+            @test size(circumcenter_hodge_op) == size(barycentric_hodge_op)
+            @test size(circumcenter_hodge_op) == size(corrected_hodge_op)
+            
+            # They should be different (unless mesh is very special)
+            if size(circumcenter_hodge_op, 1) > 0
+                @test !isapprox(circumcenter_hodge_op, barycentric_hodge_op; rtol=1e-10)
+            end
+        end
+    end
+end
