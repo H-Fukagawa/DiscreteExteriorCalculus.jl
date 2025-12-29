@@ -84,30 +84,25 @@ function elementary_duals!(simplices::Dict{Cell{N}, Vector{Tuple{SimpleBarySimpl
     return simplices[c]
 end
 
-"""
-    compute_elementary_dual(simplices::Dict, center::Function, c::Cell{N}) where N
-
-単一セルのelementary dualを計算（並列処理用、読み取りのみで辞書書き込みなし）
-親セルは既に計算済みと仮定
-"""
-function compute_elementary_dual(simplices::Dict{Cell{N}, Vector{Tuple{SimpleBarySimplex{N}, Bool}}},
-    center::Function, c::Cell{N}) where N
-    c_center = SimpleBarycentric(center(Simplex(c)))
-    result = Tuple{SimpleBarySimplex{N}, Bool}[]
-    if isempty(c.parents)
-        push!(result, ([c_center], true))
-    else
+"""キャッシュされた外心を使用するelementary_duals"""
+function elementary_duals_with_cache!(simplices::Dict{Cell{N}, Vector{Tuple{SimpleBarySimplex{N}, Bool}}},
+    all_centers::Vector{SimpleBarycentric{N}}, cell_indices::Dict{Cell{N}, Int}, c::Cell{N}) where N
+    if !(c in keys(simplices))
+        c_center = all_centers[cell_indices[c]]
+        simplices[c] = Tuple{SimpleBarySimplex{N}, Bool}[]
+        if isempty(c.parents)
+            push!(simplices[c], ([c_center], true))
+        end
         for p in keys(c.parents)
-            parent_duals = simplices[p]  # 親は既に計算済み（読み取りのみ）
-            for (ps, sign) in parent_duals
+            for (ps, sign) in elementary_duals_with_cache!(simplices, all_centers, cell_indices, p)
                 opposite_index = first_setdiff_index(ps[1].simplex.points, c.points)
                 new_sign = (ps[1].coords[opposite_index] >= 0) == sign
                 new_barycentrics = [c_center, ps...]
-                push!(result, (new_barycentrics, new_sign))
+                push!(simplices[c], (new_barycentrics, new_sign))
             end
         end
     end
-    return result
+    return simplices[c]
 end
 
 export dual
@@ -116,11 +111,9 @@ export dual
 
 Compute the dual TriangulatedComplex of a simplicial complex. `center` is a function that
 takes a `Simplex{N, K}` to a `Barycentric{N, K}`.
-
-Optimized with parallel center precomputation.
 """
 function dual(primal::CellComplex{N, K}, center::Function) where {N, K}
-    # 総セル数を推定してサイズヒント
+    # 総セル数を推定
     total_cells = sum(length(primal.cells[k]) for k in 1:K)
     
     dual_tcomp = TriangulatedComplex{N, K}()
@@ -129,9 +122,7 @@ function dual(primal::CellComplex{N, K}, center::Function) where {N, K}
     primal_to_duals = Dict{Cell{N}, Cell{N}}()
     sizehint!(primal_to_duals, total_cells)
     
-    t0 = time()
-    
-    # Phase 0: 全セルの外心を事前に並列計算（ベクトルベースでDict回避）
+    # Phase 0: 全セルの外心を事前に並列計算
     cell_indices = Dict{Cell{N}, Int}()
     sizehint!(cell_indices, total_cells)
     all_centers = Vector{SimpleBarycentric{N}}(undef, total_cells)
@@ -150,20 +141,16 @@ function dual(primal::CellComplex{N, K}, center::Function) where {N, K}
         end
         offset += ncells
     end
+    
     # iterate from high to low dimension so the cells of
     # the dual are constructed in order of dimension
     for k in reverse(1:K)
         cells_k = primal.cells[k]
         ncells = length(cells_k)
         
-        # Phase 1: elementary duals を並列計算
-        elem_results = Vector{Vector{Tuple{SimpleBarySimplex{N}, Bool}}}(undef, ncells)
-        Threads.@threads for i in 1:ncells
-            @inbounds elem_results[i] = compute_elementary_dual_indexed(primal_to_elementary_duals, all_centers, cell_indices, cells_k[i])
-        end
-        # 結果をマージ
-        for i in 1:ncells
-            @inbounds primal_to_elementary_duals[cells_k[i]] = elem_results[i]
+        # Phase 1: elementary duals を順次計算（キャッシュされた外心を使用）
+        for cell in cells_k
+            elementary_duals_with_cache!(primal_to_elementary_duals, all_centers, cell_indices, cell)
         end
         
         # Phase 2: dual cell 作成を並列計算
@@ -171,11 +158,9 @@ function dual(primal::CellComplex{N, K}, center::Function) where {N, K}
         signed_duals = Vector{Vector{Tuple{SimpleSimplex{N}, Bool}}}(undef, ncells)
         Threads.@threads for i in 1:ncells
             @inbounds begin
-                elem_duals = elem_results[i]
+                elem_duals = primal_to_elementary_duals[cells_k[i]]
                 n_elem = length(elem_duals)
                 signed_elementary_duals = Vector{Tuple{SimpleSimplex{N}, Bool}}(undef, n_elem)
-                
-                # 点収集用Set（SimpleSimplex作成と同時に点を収集）
                 points_set = Set{Point{N}}()
                 for j in 1:n_elem
                     bary_simplex = elem_duals[j][1]
@@ -188,7 +173,6 @@ function dual(primal::CellComplex{N, K}, center::Function) where {N, K}
                     end
                     signed_elementary_duals[j] = (SimpleSimplex{N}(pts), elem_duals[j][2])
                 end
-                
                 dual_cells[i] = Cell(collect(points_set), K-k+1)
                 signed_duals[i] = signed_elementary_duals
             end
@@ -208,29 +192,7 @@ function dual(primal::CellComplex{N, K}, center::Function) where {N, K}
             end
         end
     end
-    
     return dual_tcomp
-end
-
-"""インデックスベースのelementary dual計算（外心はVectorで管理）"""
-function compute_elementary_dual_indexed(simplices::Dict{Cell{N}, Vector{Tuple{SimpleBarySimplex{N}, Bool}}},
-    all_centers::Vector{SimpleBarycentric{N}}, cell_indices::Dict{Cell{N}, Int}, c::Cell{N}) where N
-    c_center = all_centers[cell_indices[c]]
-    result = Tuple{SimpleBarySimplex{N}, Bool}[]
-    if isempty(c.parents)
-        push!(result, ([c_center], true))
-    else
-        for p in keys(c.parents)
-            parent_duals = simplices[p]
-            for (ps, sign) in parent_duals
-                opposite_index = first_setdiff_index(ps[1].simplex.points, c.points)
-                new_sign = (ps[1].coords[opposite_index] >= 0) == sign
-                new_barycentrics = [c_center, ps...]
-                push!(result, (new_barycentrics, new_sign))
-            end
-        end
-    end
-    return result
 end
 
 """
