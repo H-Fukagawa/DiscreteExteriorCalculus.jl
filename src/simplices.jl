@@ -11,7 +11,19 @@ Point(coords::Vararg{<:Real}) = Point(collect(coords))
 
 Point(b::Barycentric) = Point(barycentric_matrix(b.simplex) * b.coords)
 
-Point(b::SimpleBarycentric) = Point(Barycentric(b))
+# SimpleBarycentric から直接 Point を計算（中間オブジェクト作成を回避）
+function Point(b::SimpleBarycentric{N}) where N
+    # barycentric_matrix * coords を直接計算
+    # b.simplex.points は Vector{Point{N}}、b.coords は座標ベクトル
+    result = zeros(Float64, N)
+    @inbounds for (i, pt) in enumerate(b.simplex.points)
+        c = b.coords[i]
+        for j in 1:N
+            result[j] += pt.coords[j] * c
+        end
+    end
+    return Point(result)
+end
 
 function Simplex(points::AbstractVector{Point{N}}) where N
     K = length(points)
