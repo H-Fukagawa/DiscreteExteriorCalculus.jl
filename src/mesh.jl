@@ -118,10 +118,10 @@ takes a `Simplex{N, K}` to a `Barycentric{N, K}`.
 function dual(primal::CellComplex{N, K}, center::Function) where {N, K}
     # 総セル数を推定
     total_cells = sum(length(primal.cells[k]) for k in 1:K)
-    
-    dual_tcomp = TriangulatedComplex{N, K}()
-    primal_to_duals = Dict{Cell{N}, Cell{N}}()
-    sizehint!(primal_to_duals, total_cells)
+
+    # Phase 0-2 で dual cell / simplices を作成し、Phase 3 で関係を構築する。
+    # Phase 3 は parent! を使うと dual_cell.children への push! が競合するため、
+    # 「各dualセルの中身だけを書き換える」2パス方式でロック無し並列化する。
     
     # Phase 0: 全セルの外心を事前に並列計算 + セルインデックス構築
     cell_to_idx = Dict{Cell{N}, Int}()
@@ -148,6 +148,10 @@ function dual(primal::CellComplex{N, K}, center::Function) where {N, K}
     
     # elementary duals用ベクトル（辞書の代わり）
     simplices_vec = Vector{Vector{Tuple{SimpleBarySimplex{N}, Bool}}}(undef, total_cells)
+
+    # primal cell index -> dual cell / signed dual simplices
+    dual_of_idx = Vector{Cell{N}}(undef, total_cells)
+    signed_duals_of_idx = Vector{Vector{SignedSimpleSimplex{N}}}(undef, total_cells)
     
     # iterate from high to low dimension so the cells of
     # the dual are constructed in order of dimension
@@ -196,22 +200,98 @@ function dual(primal::CellComplex{N, K}, center::Function) where {N, K}
                 signed_duals[i] = signed_elementary_duals
             end
         end
-        
-        # Phase 3: 順次処理（依存関係あり）
+
+        # Phase 2.5: グローバル配列へ格納（添字は一意なので安全）
         for i in 1:ncells
             cell = cells_k[i]
-            dual_cell = dual_cells[i]
-            push!(dual_tcomp.complex, dual_cell)
-            dual_tcomp.simplices[dual_cell] = signed_duals[i]
-            primal_to_duals[cell] = dual_cell
-            for parent in keys(cell.parents)
-                o = cell.parents[parent]
-                dual_child = primal_to_duals[parent]
-                parent!(dual_child, dual_cell, k == 1 ? !o : o)
+            cidx = cell_to_idx[cell]
+            @inbounds begin
+                dual_of_idx[cidx] = dual_cells[i]
+                signed_duals_of_idx[cidx] = signed_duals[i]
             end
         end
     end
-    return dual_tcomp
+
+    # ----------------------------------------------------------------------
+    # Phase 3: children/parents 構築（ロック無し 2パス並列）
+    #
+    # ルール（元の parent! の挙動と同等）:
+    # - dual(cell).children  = [ dual(parent)  for parent in keys(cell.parents) ]
+    # - dual(cell).parents[pdual] = orient
+    #     where pdual = dual(child) for child in cell.children
+    #           orient = (child.K == 1 ? !o : o), o = child.parents[cell]
+    # ----------------------------------------------------------------------
+
+    # Pass A: parents のみ埋める（dual_cell.parents をセルごとに独占更新）
+    for k in 1:K
+        cells_k = primal.cells[k]
+        ncells = length(cells_k)
+        Threads.@threads for i in 1:ncells
+            @inbounds begin
+                cell = cells_k[i]
+                cidx = cell_to_idx[cell]
+                dcell = dual_of_idx[cidx]
+                empty!(dcell.parents)
+                sizehint!(dcell.parents, length(cell.children))
+                for child in cell.children
+                    child_idx = cell_to_idx[child]
+                    pdual = dual_of_idx[child_idx]  # dual(child) が parent
+                    o = child.parents[cell]
+                    dcell.parents[pdual] = (child.K == 1 ? !o : o)
+                end
+            end
+        end
+    end
+
+    # Pass B: children のみ埋める（dual_cell.children をセルごとに独占更新）
+    for k in 1:K
+        cells_k = primal.cells[k]
+        ncells = length(cells_k)
+        Threads.@threads for i in 1:ncells
+            @inbounds begin
+                cell = cells_k[i]
+                cidx = cell_to_idx[cell]
+                dcell = dual_of_idx[cidx]
+                empty!(dcell.children)
+                sizehint!(dcell.children, length(cell.parents))
+                for parent in keys(cell.parents)
+                    parent_idx = cell_to_idx[parent]
+                    push!(dcell.children, dual_of_idx[parent_idx])
+                end
+            end
+        end
+    end
+
+    # ----------------------------------------------------------------------
+    # TriangulatedComplex を組み立て（index整合性を保つ）
+    # dual の k 次元セル配列は primal の (K-k+1) 次元セル配列と同じ順序にする
+    # ----------------------------------------------------------------------
+    dual_cells_by_dim = Vector{Vector{Cell{N}}}(undef, K)
+    for primal_k in 1:K
+        cells_k = primal.cells[primal_k]
+        ncells = length(cells_k)
+        dual_k = K - primal_k + 1
+        dual_cells_k = Vector{Cell{N}}(undef, ncells)
+        for i in 1:ncells
+            cell = cells_k[i]
+            dual_cells_k[i] = dual_of_idx[cell_to_idx[cell]]
+        end
+        dual_cells_by_dim[dual_k] = dual_cells_k
+    end
+
+    # CellComplex を構築
+    cells_by_dim = [UniqueVector{Cell{N}}(dual_cells_by_dim[k]) for k in 1:K]
+    dual_complex = CellComplex{N, K}(SVector{K}(cells_by_dim...))
+
+    # simplices Dict を構築（添字で集めたものを展開）
+    dual_simplices = Dict{Cell{N}, Vector{SignedSimpleSimplex{N}}}()
+    sizehint!(dual_simplices, total_cells)
+    for idx in 1:total_cells
+        dcell = dual_of_idx[idx]
+        dual_simplices[dcell] = signed_duals_of_idx[idx]
+    end
+
+    return TriangulatedComplex{N, K}(dual_complex, dual_simplices)
 end
 
 """
