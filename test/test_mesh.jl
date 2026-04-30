@@ -76,6 +76,68 @@ end
     end
 end
 
+@testset "polygonal 2D non-simplex mesh" begin
+    m = Metric(2)
+    quad_points = [
+        Point(0, 0),
+        Point(1, 0),
+        Point(1, 1),
+        Point(0, 1),
+    ]
+
+    quad_tcomp = quadrilateral_complex(quad_points)
+    @test map(length, quad_tcomp.complex.cells) == [4, 4, 1]
+    @test length(quad_tcomp.complex.cells[3][1].points) == 4
+    @test length(quad_tcomp.simplices[quad_tcomp.complex.cells[3][1]]) == 2
+    @test volume(m, quad_tcomp, quad_tcomp.complex.cells[3][1]) ≈ 1.0
+
+    quad_mesh = Mesh(quad_tcomp, centroid)
+    @test map(length, quad_mesh.dual.complex.cells) == [1, 4, 4]
+
+    circum_mesh = Mesh(quad_tcomp, circumcenter(m))
+    quad_center = circum_mesh.dual.complex.cells[1][1].points[1]
+    @test quad_center.coords ≈ [0.5, 0.5]
+
+    hex_points = [
+        Point(1, 0),
+        Point(2, 0),
+        Point(3, 1),
+        Point(2, 2),
+        Point(1, 2),
+        Point(0, 1),
+    ]
+
+    hex_tcomp = hexagonal_complex(hex_points)
+    @test map(length, hex_tcomp.complex.cells) == [6, 6, 1]
+    @test length(hex_tcomp.simplices[hex_tcomp.complex.cells[3][1]]) == 4
+    @test volume(m, hex_tcomp, hex_tcomp.complex.cells[3][1]) ≈ 4.0
+
+    hex_mesh = Mesh(hex_tcomp, centroid)
+    @test map(length, hex_mesh.dual.complex.cells) == [1, 6, 6]
+end
+
+@testset "shared quadrilateral edge orientation" begin
+    points = [
+        Point(0, 0), Point(1, 0), Point(2, 0),
+        Point(0, 1), Point(1, 1), Point(2, 1),
+    ]
+    quads = [
+        [1, 2, 5, 4],
+        [2, 3, 6, 5],
+    ]
+
+    tcomp = quadrilateral_complex(points, quads)
+    @test map(length, tcomp.complex.cells) == [6, 7, 2]
+    @test sum(volume(Metric(2), tcomp, c) for c in tcomp.complex.cells[3]) ≈ 2.0
+
+    shared_edges = filter(c -> length(c.parents) == 2, tcomp.complex.cells[2])
+    @test length(shared_edges) == 1
+    @test Set(values(shared_edges[1].parents)) == Set([true, false])
+
+    mesh = Mesh(tcomp, centroid)
+    @test map(length, mesh.dual.complex.cells) == [2, 7, 6]
+end
+
 @testset "polyhedral hex and prism mesh" begin
     m = Metric(3)
     hex_points = [

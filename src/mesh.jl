@@ -73,7 +73,8 @@ function cell_center(center::Function, c::Cell{N}) where N
     return _as_simple_barycentric(center(c))
 end
 
-export polyhedral_complex, hexahedral_complex, prismatic_complex, prism_complex
+export polygonal_complex, quadrilateral_complex, quad_complex, hexagonal_complex,
+    hexagon_complex, polyhedral_complex, hexahedral_complex, prismatic_complex, prism_complex
 
 const _HEX_FACES = (
     (1, 4, 3, 2),
@@ -165,12 +166,10 @@ _same_edge_orientation(stored::AbstractVector{Point{N}},
 
 function _add_default_cell_simplices!(simplices::Dict{Cell{N}, Vector{SignedSimpleSimplex{N}}},
     c::Cell{N}) where N
-    if c.K == 3 && length(c.points) == 4
+    if c.K == 3 && length(c.points) >= 3
         p = c.points
-        simplices[c] = [
-            (SimpleSimplex(Point{N}[p[1], p[2], p[3]]), true),
-            (SimpleSimplex(Point{N}[p[1], p[3], p[4]]), true),
-        ]
+        simplices[c] = [(SimpleSimplex(Point{N}[p[1], p[i], p[i + 1]]), true)
+            for i in 2:(length(p) - 1)]
     else
         simplices[c] = [(SimpleSimplex(c.points), true)]
     end
@@ -236,6 +235,66 @@ function _volume_simplices(kind::Symbol, points::AbstractVector{Point{N}}) where
     return [(SimpleSimplex(Point{N}[points[i] for i in tet]), true)
         for tet in _polyhedron_tets(kind)]
 end
+
+"""
+    polygonal_complex(polygons)
+    polygonal_complex(points, polygons)
+
+Create a 2D `TriangulatedComplex` from ordered polygon cells while preserving those cells
+in the primal complex. Polygon volumes are computed with fan triangulation from the first
+vertex, so polygons should be simple and ordered along their boundary.
+"""
+function polygonal_complex(polygons::AbstractVector{<:AbstractVector{Point{N}}}) where N
+    cell_map = Dict{Set{Point{N}}, Cell{N}}()
+    cell_lists = [Cell{N}[] for _ in 1:3]
+    simplices = Dict{Cell{N}, Vector{SignedSimpleSimplex{N}}}()
+
+    for raw_points in polygons
+        points = collect(raw_points)
+        @assert length(points) >= 3
+        _ensure_poly_face!(cell_map, cell_lists, simplices, points)
+    end
+
+    cells_by_dim = [UniqueVector{Cell{N}}(cell_lists[k]) for k in 1:3]
+    complex = CellComplex{N, 3}(SVector{3}(cells_by_dim...))
+    return TriangulatedComplex{N, 3}(complex, simplices)
+end
+
+polygonal_complex(polygon::AbstractVector{Point{N}}) where N =
+    polygonal_complex([polygon])
+
+polygonal_complex(points::AbstractVector{Point{N}},
+    polygons::AbstractVector{<:AbstractVector{<:Integer}}) where N =
+    polygonal_complex([[points[i] for i in polygon] for polygon in polygons])
+
+function _check_polygon_size(polygons, n::Int)
+    @assert all(length(polygon) == n for polygon in polygons)
+    return polygons
+end
+
+quadrilateral_complex(quad::AbstractVector{Point{N}}) where N =
+    polygonal_complex(_check_polygon_size([quad], 4))
+
+quadrilateral_complex(quads::AbstractVector{<:AbstractVector{Point{N}}}) where N =
+    polygonal_complex(_check_polygon_size(quads, 4))
+
+quadrilateral_complex(points::AbstractVector{Point{N}},
+    quads::AbstractVector{<:AbstractVector{<:Integer}}) where N =
+    polygonal_complex(points, _check_polygon_size(quads, 4))
+
+quad_complex(args...) = quadrilateral_complex(args...)
+
+hexagonal_complex(hexagon::AbstractVector{Point{N}}) where N =
+    polygonal_complex(_check_polygon_size([hexagon], 6))
+
+hexagonal_complex(hexagons::AbstractVector{<:AbstractVector{Point{N}}}) where N =
+    polygonal_complex(_check_polygon_size(hexagons, 6))
+
+hexagonal_complex(points::AbstractVector{Point{N}},
+    hexagons::AbstractVector{<:AbstractVector{<:Integer}}) where N =
+    polygonal_complex(points, _check_polygon_size(hexagons, 6))
+
+hexagon_complex(args...) = hexagonal_complex(args...)
 
 """
     polyhedral_complex(elements)
