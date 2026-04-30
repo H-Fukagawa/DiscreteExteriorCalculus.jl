@@ -56,18 +56,256 @@ volume(m::Metric{N}, tcomp::TriangulatedComplex{N}, c::Cell{N}) where N =
 
 SimpleBarySimplex{N} = Vector{SimpleBarycentric{N}}
 
+_as_simple_barycentric(b::SimpleBarycentric) = b
+_as_simple_barycentric(b::Barycentric) = SimpleBarycentric(b)
+_as_simple_barycentric(p::Point) = SimpleBarycentric(p)
+_as_simple_barycentric(coords::AbstractVector{<:Real}) = SimpleBarycentric(Point(coords))
+
+function cell_center(center::Function, c::Cell{N}) where N
+    if length(c.points) == c.K
+        try
+            return _as_simple_barycentric(center(Simplex(c)))
+        catch err
+            err isa MethodError || rethrow()
+        end
+    end
+
+    return _as_simple_barycentric(center(c))
+end
+
+export polyhedral_complex, hexahedral_complex, prismatic_complex, prism_complex
+
+const _HEX_FACES = (
+    (1, 4, 3, 2),
+    (5, 6, 7, 8),
+    (1, 2, 6, 5),
+    (2, 3, 7, 6),
+    (3, 4, 8, 7),
+    (4, 1, 5, 8),
+)
+
+const _HEX_TETS = (
+    (1, 2, 3, 7),
+    (1, 3, 4, 7),
+    (1, 4, 8, 7),
+    (1, 8, 5, 7),
+    (1, 5, 6, 7),
+    (1, 6, 2, 7),
+)
+
+const _PRISM_FACES = (
+    (1, 3, 2),
+    (4, 5, 6),
+    (1, 2, 5, 4),
+    (2, 3, 6, 5),
+    (3, 1, 4, 6),
+)
+
+const _PRISM_TETS = (
+    (1, 2, 3, 5),
+    (1, 3, 6, 5),
+    (1, 6, 4, 5),
+)
+
+function _polyhedron_faces(kind::Symbol)
+    if kind in (:hex, :hexahedron, :hexahedral)
+        return _HEX_FACES
+    elseif kind in (:prism, :wedge, :triangular_prism)
+        return _PRISM_FACES
+    else
+        error("unsupported polyhedron kind: $kind")
+    end
+end
+
+function _polyhedron_tets(kind::Symbol)
+    if kind in (:hex, :hexahedron, :hexahedral)
+        return _HEX_TETS
+    elseif kind in (:prism, :wedge, :triangular_prism)
+        return _PRISM_TETS
+    else
+        error("unsupported polyhedron kind: $kind")
+    end
+end
+
+function _expected_vertex_count(kind::Symbol)
+    if kind in (:hex, :hexahedron, :hexahedral)
+        return 8
+    elseif kind in (:prism, :wedge, :triangular_prism)
+        return 6
+    else
+        error("unsupported polyhedron kind: $kind")
+    end
+end
+
+function _same_polygon_orientation(stored::AbstractVector{Point{N}},
+    local_points::AbstractVector{Point{N}}) where N
+    n = length(local_points)
+    @assert length(stored) == n
+    @assert Set(stored) == Set(local_points)
+
+    for shift in 0:(n - 1)
+        if all(stored[mod1(i + shift, n)] == local_points[i] for i in 1:n)
+            return true
+        end
+    end
+
+    reversed_local = reverse(local_points)
+    for shift in 0:(n - 1)
+        if all(stored[mod1(i + shift, n)] == reversed_local[i] for i in 1:n)
+            return false
+        end
+    end
+
+    error("face points are not a cyclic permutation")
+end
+
+_same_edge_orientation(stored::AbstractVector{Point{N}},
+    local_points::AbstractVector{Point{N}}) where N =
+    stored[1] == local_points[1] && stored[2] == local_points[2]
+
+function _add_default_cell_simplices!(simplices::Dict{Cell{N}, Vector{SignedSimpleSimplex{N}}},
+    c::Cell{N}) where N
+    if c.K == 3 && length(c.points) == 4
+        p = c.points
+        simplices[c] = [
+            (SimpleSimplex(Point{N}[p[1], p[2], p[3]]), true),
+            (SimpleSimplex(Point{N}[p[1], p[3], p[4]]), true),
+        ]
+    else
+        simplices[c] = [(SimpleSimplex(c.points), true)]
+    end
+
+    return simplices
+end
+
+function _get_poly_cell!(cell_map::Dict{Set{Point{N}}, Cell{N}},
+    cell_lists::Vector{Vector{Cell{N}}},
+    simplices::Dict{Cell{N}, Vector{SignedSimpleSimplex{N}}},
+    points::AbstractVector{Point{N}}, K::Int; add_simplices::Bool=true) where N
+    key = Set(points)
+    if haskey(cell_map, key)
+        return cell_map[key], false
+    end
+
+    cell = Cell(collect(points), K)
+    cell_map[key] = cell
+    push!(cell_lists[K], cell)
+
+    if add_simplices
+        _add_default_cell_simplices!(simplices, cell)
+    end
+
+    return cell, true
+end
+
+function _ensure_poly_edge!(cell_map::Dict{Set{Point{N}}, Cell{N}},
+    cell_lists::Vector{Vector{Cell{N}}},
+    simplices::Dict{Cell{N}, Vector{SignedSimpleSimplex{N}}},
+    points::AbstractVector{Point{N}}) where N
+    edge, created = _get_poly_cell!(cell_map, cell_lists, simplices, points, 2)
+
+    if created
+        v1, _ = _get_poly_cell!(cell_map, cell_lists, simplices, Point{N}[edge.points[1]], 1)
+        v2, _ = _get_poly_cell!(cell_map, cell_lists, simplices, Point{N}[edge.points[2]], 1)
+        parent!(v1, edge, false)
+        parent!(v2, edge, true)
+    end
+
+    return edge
+end
+
+function _ensure_poly_face!(cell_map::Dict{Set{Point{N}}, Cell{N}},
+    cell_lists::Vector{Vector{Cell{N}}},
+    simplices::Dict{Cell{N}, Vector{SignedSimpleSimplex{N}}},
+    points::AbstractVector{Point{N}}) where N
+    face, created = _get_poly_cell!(cell_map, cell_lists, simplices, points, 3)
+
+    if created
+        n = length(points)
+        for i in 1:n
+            local_edge = Point{N}[points[i], points[mod1(i + 1, n)]]
+            edge = _ensure_poly_edge!(cell_map, cell_lists, simplices, local_edge)
+            parent!(edge, face, _same_edge_orientation(edge.points, local_edge))
+        end
+    end
+
+    return face
+end
+
+function _volume_simplices(kind::Symbol, points::AbstractVector{Point{N}}) where N
+    return [(SimpleSimplex(Point{N}[points[i] for i in tet]), true)
+        for tet in _polyhedron_tets(kind)]
+end
+
+"""
+    polyhedral_complex(elements)
+
+Create a 3D `TriangulatedComplex` from hexahedron and triangular-prism cells while
+preserving those cells in the primal complex. Each element is `(kind, points)`, where
+`kind` is `:hex`/`:hexahedron` or `:prism`/`:wedge`.
+"""
+function polyhedral_complex(
+    elements::AbstractVector{<:Tuple{Symbol,<:AbstractVector{Point{N}}}}) where N
+    cell_map = Dict{Set{Point{N}}, Cell{N}}()
+    cell_lists = [Cell{N}[] for _ in 1:4]
+    simplices = Dict{Cell{N}, Vector{SignedSimpleSimplex{N}}}()
+
+    for (kind, raw_points) in elements
+        points = collect(raw_points)
+        @assert length(points) == _expected_vertex_count(kind)
+
+        volume_cell, created = _get_poly_cell!(
+            cell_map, cell_lists, simplices, points, 4; add_simplices=false)
+        @assert created
+        simplices[volume_cell] = _volume_simplices(kind, points)
+
+        for face_indices in _polyhedron_faces(kind)
+            face_points = Point{N}[points[i] for i in face_indices]
+            face = _ensure_poly_face!(cell_map, cell_lists, simplices, face_points)
+            parent!(face, volume_cell, _same_polygon_orientation(face.points, face_points))
+        end
+    end
+
+    cells_by_dim = [UniqueVector{Cell{N}}(cell_lists[k]) for k in 1:4]
+    complex = CellComplex{N, 4}(SVector{4}(cells_by_dim...))
+    return TriangulatedComplex{N, 4}(complex, simplices)
+end
+
+hexahedral_complex(hex::AbstractVector{Point{N}}) where N =
+    hexahedral_complex([hex])
+
+hexahedral_complex(hexes::AbstractVector{<:AbstractVector{Point{N}}}) where N =
+    polyhedral_complex([(:hex, collect(hex)) for hex in hexes])
+
+hexahedral_complex(points::AbstractVector{Point{N}},
+    hexes::AbstractVector{<:AbstractVector{<:Integer}}) where N =
+    hexahedral_complex([[points[i] for i in hex] for hex in hexes])
+
+prismatic_complex(prism::AbstractVector{Point{N}}) where N =
+    prismatic_complex([prism])
+
+prismatic_complex(prisms::AbstractVector{<:AbstractVector{Point{N}}}) where N =
+    polyhedral_complex([(:prism, collect(prism)) for prism in prisms])
+
+prismatic_complex(points::AbstractVector{Point{N}},
+    prisms::AbstractVector{<:AbstractVector{<:Integer}}) where N =
+    prismatic_complex([[points[i] for i in prism] for prism in prisms])
+
+prism_complex(args...) = prismatic_complex(args...)
+
 """
     elementary_duals!(simplices::Dict{Cell{N}, Vector{Tuple{SimpleBarySimplex{N}, Bool}}},
         center::Function, c::Cell{N}) where N
 
 Compute the elementary dual simplices of `cell`. `simplices` is a mapping from primal cells
 to dual elementary simplices, specified as Barycentrics along with signs, and is used for
-memoization. `center` is a function that takes a `Simplex{N, K}` to a `Barycentric{N, K}`.
+memoization. `center` is a function that takes simplex cells as `Simplex{N, K}` and general
+cells as `Cell{N}`.
 """
 function elementary_duals!(simplices::Dict{Cell{N}, Vector{Tuple{SimpleBarySimplex{N}, Bool}}},
     center::Function, c::Cell{N}) where N
     if !(c in keys(simplices))
-        c_center = SimpleBarycentric(center(Simplex(c)))
+        c_center = cell_center(center, c)
         simplices[c] = Tuple{SimpleBarySimplex{N}, Bool}[]
         if isempty(c.parents)
             push!(simplices[c], ([c_center], true))
@@ -112,32 +350,32 @@ export dual
 """
     dual(primal::CellComplex{N, K}, center::Function) where {N, K}
 
-Compute the dual TriangulatedComplex of a simplicial complex. `center` is a function that
-takes a `Simplex{N, K}` to a `Barycentric{N, K}`.
+Compute the dual TriangulatedComplex of a cell complex. `center` is a function that takes
+simplex cells as `Simplex{N, K}` and general cells as `Cell{N}`.
 """
 function dual(primal::CellComplex{N, K}, center::Function) where {N, K}
     # 総セル数を推定
     total_cells = sum(length(primal.cells[k]) for k in 1:K)
-    
-    dual_tcomp = TriangulatedComplex{N, K}()
-    primal_to_duals = Dict{Cell{N}, Cell{N}}()
-    sizehint!(primal_to_duals, total_cells)
-    
+
+    # Phase 0-2 で dual cell / simplices を作成し、Phase 3 で関係を構築する。
+    # Phase 3 は parent! を使うと dual_cell.children への push! が競合するため、
+    # 「各dualセルの中身だけを書き換える」2パス方式でロック無し並列化する。
+
     # Phase 0: 全セルの外心を事前に並列計算 + セルインデックス構築
     cell_to_idx = Dict{Cell{N}, Int}()
     sizehint!(cell_to_idx, total_cells)
     all_centers = Vector{SimpleBarycentric{N}}(undef, total_cells)
     all_cells = Vector{Cell{N}}(undef, total_cells)  # インデックス→セル
-    
+
     offset = 0
     for k in 1:K
         cells_k = primal.cells[k]
         ncells = length(cells_k)
-        
+
         Threads.@threads for i in 1:ncells
-            @inbounds all_centers[offset + i] = SimpleBarycentric(center(Simplex(cells_k[i])))
+            @inbounds all_centers[offset + i] = cell_center(center, cells_k[i])
         end
-        
+
         for i in 1:ncells
             idx = offset + i
             @inbounds cell_to_idx[cells_k[i]] = idx
@@ -145,16 +383,20 @@ function dual(primal::CellComplex{N, K}, center::Function) where {N, K}
         end
         offset += ncells
     end
-    
+
     # elementary duals用ベクトル（辞書の代わり）
     simplices_vec = Vector{Vector{Tuple{SimpleBarySimplex{N}, Bool}}}(undef, total_cells)
-    
+
+    # primal cell index -> dual cell / signed dual simplices
+    dual_of_idx = Vector{Cell{N}}(undef, total_cells)
+    signed_duals_of_idx = Vector{Vector{SignedSimpleSimplex{N}}}(undef, total_cells)
+
     # iterate from high to low dimension so the cells of
     # the dual are constructed in order of dimension
     for k in reverse(1:K)
         cells_k = primal.cells[k]
         ncells = length(cells_k)
-        
+
         # Phase 1: elementary duals を並列計算（親は既に計算済み）
         # 同じ次元のセル同士は独立、親は高次元なので既に処理済み
         elem_results = Vector{Vector{Tuple{SimpleBarySimplex{N}, Bool}}}(undef, ncells)
@@ -170,7 +412,7 @@ function dual(primal::CellComplex{N, K}, center::Function) where {N, K}
         for i in 1:ncells
             @inbounds simplices_vec[cell_to_idx[cells_k[i]]] = elem_results[i]
         end
-        
+
         # Phase 2: dual cell 作成を並列計算（ベクトル参照）
         dual_cells = Vector{Cell{N}}(undef, ncells)
         signed_duals = Vector{Vector{Tuple{SimpleSimplex{N}, Bool}}}(undef, ncells)
@@ -196,22 +438,98 @@ function dual(primal::CellComplex{N, K}, center::Function) where {N, K}
                 signed_duals[i] = signed_elementary_duals
             end
         end
-        
-        # Phase 3: 順次処理（依存関係あり）
+
+        # Phase 2.5: グローバル配列へ格納（添字は一意なので安全）
         for i in 1:ncells
             cell = cells_k[i]
-            dual_cell = dual_cells[i]
-            push!(dual_tcomp.complex, dual_cell)
-            dual_tcomp.simplices[dual_cell] = signed_duals[i]
-            primal_to_duals[cell] = dual_cell
-            for parent in keys(cell.parents)
-                o = cell.parents[parent]
-                dual_child = primal_to_duals[parent]
-                parent!(dual_child, dual_cell, k == 1 ? !o : o)
+            cidx = cell_to_idx[cell]
+            @inbounds begin
+                dual_of_idx[cidx] = dual_cells[i]
+                signed_duals_of_idx[cidx] = signed_duals[i]
             end
         end
     end
-    return dual_tcomp
+
+    # ----------------------------------------------------------------------
+    # Phase 3: children/parents 構築（ロック無し 2パス並列）
+    #
+    # ルール（元の parent! の挙動と同等）:
+    # - dual(cell).children  = [ dual(parent)  for parent in keys(cell.parents) ]
+    # - dual(cell).parents[pdual] = orient
+    #     where pdual = dual(child) for child in cell.children
+    #           orient = (child.K == 1 ? !o : o), o = child.parents[cell]
+    # ----------------------------------------------------------------------
+
+    # Pass A: parents のみ埋める（dual_cell.parents をセルごとに独占更新）
+    for k in 1:K
+        cells_k = primal.cells[k]
+        ncells = length(cells_k)
+        Threads.@threads for i in 1:ncells
+            @inbounds begin
+                cell = cells_k[i]
+                cidx = cell_to_idx[cell]
+                dcell = dual_of_idx[cidx]
+                empty!(dcell.parents)
+                sizehint!(dcell.parents, length(cell.children))
+                for child in cell.children
+                    child_idx = cell_to_idx[child]
+                    pdual = dual_of_idx[child_idx]  # dual(child) が parent
+                    o = child.parents[cell]
+                    dcell.parents[pdual] = (child.K == 1 ? !o : o)
+                end
+            end
+        end
+    end
+
+    # Pass B: children のみ埋める（dual_cell.children をセルごとに独占更新）
+    for k in 1:K
+        cells_k = primal.cells[k]
+        ncells = length(cells_k)
+        Threads.@threads for i in 1:ncells
+            @inbounds begin
+                cell = cells_k[i]
+                cidx = cell_to_idx[cell]
+                dcell = dual_of_idx[cidx]
+                empty!(dcell.children)
+                sizehint!(dcell.children, length(cell.parents))
+                for parent in keys(cell.parents)
+                    parent_idx = cell_to_idx[parent]
+                    push!(dcell.children, dual_of_idx[parent_idx])
+                end
+            end
+        end
+    end
+
+    # ----------------------------------------------------------------------
+    # TriangulatedComplex を組み立て（index整合性を保つ）
+    # dual の k 次元セル配列は primal の (K-k+1) 次元セル配列と同じ順序にする
+    # ----------------------------------------------------------------------
+    dual_cells_by_dim = Vector{Vector{Cell{N}}}(undef, K)
+    for primal_k in 1:K
+        cells_k = primal.cells[primal_k]
+        ncells = length(cells_k)
+        dual_k = K - primal_k + 1
+        dual_cells_k = Vector{Cell{N}}(undef, ncells)
+        for i in 1:ncells
+            cell = cells_k[i]
+            dual_cells_k[i] = dual_of_idx[cell_to_idx[cell]]
+        end
+        dual_cells_by_dim[dual_k] = dual_cells_k
+    end
+
+    # CellComplex を構築
+    cells_by_dim = [UniqueVector{Cell{N}}(dual_cells_by_dim[k]) for k in 1:K]
+    dual_complex = CellComplex{N, K}(SVector{K}(cells_by_dim...))
+
+    # simplices Dict を構築（添字で集めたものを展開）
+    dual_simplices = Dict{Cell{N}, Vector{SignedSimpleSimplex{N}}}()
+    sizehint!(dual_simplices, total_cells)
+    for idx in 1:total_cells
+        dcell = dual_of_idx[idx]
+        dual_simplices[dcell] = signed_duals_of_idx[idx]
+    end
+
+    return TriangulatedComplex{N, K}(dual_complex, dual_simplices)
 end
 
 """

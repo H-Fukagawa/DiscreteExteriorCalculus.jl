@@ -1,5 +1,5 @@
 using StaticArrays: SVector
-using LinearAlgebra: I
+using LinearAlgebra: I, rank
 using Combinatorics: combinations
 
 function Point(coords::AbstractVector{<:Real})
@@ -70,6 +70,9 @@ SimpleBarycentric(s::SimpleSimplex{N}, coords::AbstractVector{<:Real}) where N =
     SimpleBarycentric{N}(s, collect(coords))
 
 SimpleBarycentric(b::Barycentric) = SimpleBarycentric(SimpleSimplex(b.simplex), b.coords)
+
+SimpleBarycentric(p::Point{N}) where N =
+    SimpleBarycentric(SimpleSimplex(Point{N}[p]), [1.0])
 
 export subsimplices
 """
@@ -191,9 +194,55 @@ export circumcenter
 """
     circumcenter(m::Metric{N}) where N
 
-Return a function taking a `Simplex{N}` to the Barycentric of its circumcenter.
+Return a function taking a `Simplex{N}` or `Cell{N}` to its circumcenter. Simplex inputs
+return barycentric coordinates; general cells return a point in the cell's affine hull.
 """
-circumcenter(m::Metric{N}) where N = s::Simplex{N} -> circumsphere_barycentric(m, s)[1]
+function circumcenter_point(m::Metric{N}, c::Cell{N}) where N
+    if length(c.points) == 1
+        return c.points[1]
+    end
+
+    origin = c.points[1].coords
+    target_dim = min(c.K - 1, N, length(c.points) - 1)
+    basis = SVector{N, Float64}[]
+
+    for p in c.points[2:end]
+        v = p.coords - origin
+        if norm(m, v) <= 1e-12
+            continue
+        end
+
+        if isempty(basis)
+            push!(basis, v)
+        elseif rank(hcat(basis..., v)) > length(basis)
+            push!(basis, v)
+        end
+
+        if length(basis) == target_dim
+            break
+        end
+    end
+
+    if isempty(basis)
+        return Point(origin)
+    end
+
+    U = hcat(basis...)
+    A = zeros(Float64, length(c.points) - 1, length(basis))
+    rhs = zeros(Float64, length(c.points) - 1)
+
+    for (row, p) in enumerate(c.points[2:end])
+        v = p.coords - origin
+        A[row, :] = vec(2 .* (transpose(v) * m.mat * U))
+        rhs[row] = transpose(v) * m.mat * v
+    end
+
+    y = A \ rhs
+    return Point(origin + U * y)
+end
+
+circumcenter(m::Metric{N}) where N = x -> x isa Simplex{N} ?
+    circumsphere_barycentric(m, x)[1] : circumcenter_point(m, x)
 
 export centroid
 """
@@ -202,6 +251,9 @@ export centroid
 Compute the Barycentric of the centroid of a simplex.
 """
 centroid(s::Simplex{N, K}) where {N, K} = Barycentric(s, SVector{K, Float64}(ones(K)/K))
+
+centroid(c::Cell{N}) where N =
+    SimpleBarycentric(SimpleSimplex(c.points), fill(1.0 / length(c.points), length(c.points)))
 
 """
     barycentric_subspace(m::Metric{N}, s::Simplex{N, K}, f::Simplex{N, J},

@@ -75,3 +75,70 @@ end
         @test volume(m, mesh.dual, c) ≈ (sqrt(3)/12) * (k == 6 ? k : k-1)
     end
 end
+
+@testset "polyhedral hex and prism mesh" begin
+    m = Metric(3)
+    hex_points = [
+        Point(0, 0, 0),
+        Point(1, 0, 0),
+        Point(1, 1, 0),
+        Point(0, 1, 0),
+        Point(0, 0, 1),
+        Point(1, 0, 1),
+        Point(1, 1, 1),
+        Point(0, 1, 1),
+    ]
+
+    hex_tcomp = hexahedral_complex(hex_points)
+    @test map(length, hex_tcomp.complex.cells) == [8, 12, 6, 1]
+    @test all(length(c.points) == 4 for c in hex_tcomp.complex.cells[3])
+    @test length(hex_tcomp.complex.cells[4][1].points) == 8
+    @test volume(m, hex_tcomp, hex_tcomp.complex.cells[4][1]) ≈ 1.0
+
+    hex_mesh = Mesh(hex_tcomp, centroid)
+    @test map(length, hex_mesh.dual.complex.cells) == [1, 6, 12, 8]
+
+    circum_mesh = Mesh(hex_tcomp, circumcenter(m))
+    hex_center = circum_mesh.dual.complex.cells[1][1].points[1]
+    @test hex_center.coords ≈ [0.5, 0.5, 0.5]
+
+    prism_points = [
+        Point(0, 0, 0),
+        Point(1, 0, 0),
+        Point(0, 1, 0),
+        Point(0, 0, 1),
+        Point(1, 0, 1),
+        Point(0, 1, 1),
+    ]
+
+    prism_tcomp = prismatic_complex(prism_points)
+    @test map(length, prism_tcomp.complex.cells) == [6, 9, 5, 1]
+    @test count(c -> length(c.points) == 3, prism_tcomp.complex.cells[3]) == 2
+    @test count(c -> length(c.points) == 4, prism_tcomp.complex.cells[3]) == 3
+    @test length(prism_tcomp.complex.cells[4][1].points) == 6
+    @test volume(m, prism_tcomp, prism_tcomp.complex.cells[4][1]) ≈ 0.5
+
+    prism_mesh = Mesh(prism_tcomp, centroid)
+    @test map(length, prism_mesh.dual.complex.cells) == [1, 5, 9, 6]
+end
+
+@testset "shared hexahedron face orientation" begin
+    points = [
+        Point(0, 0, 0), Point(1, 0, 0), Point(2, 0, 0),
+        Point(0, 1, 0), Point(1, 1, 0), Point(2, 1, 0),
+        Point(0, 0, 1), Point(1, 0, 1), Point(2, 0, 1),
+        Point(0, 1, 1), Point(1, 1, 1), Point(2, 1, 1),
+    ]
+    hexes = [
+        [1, 2, 5, 4, 7, 8, 11, 10],
+        [2, 3, 6, 5, 8, 9, 12, 11],
+    ]
+
+    tcomp = hexahedral_complex(points, hexes)
+    @test map(length, tcomp.complex.cells) == [12, 20, 11, 2]
+    @test sum(volume(Metric(3), tcomp, c) for c in tcomp.complex.cells[4]) ≈ 2.0
+
+    shared_faces = filter(c -> length(c.parents) == 2, tcomp.complex.cells[3])
+    @test length(shared_faces) == 1
+    @test Set(values(shared_faces[1].parents)) == Set([true, false])
+end

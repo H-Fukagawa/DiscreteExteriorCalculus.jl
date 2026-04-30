@@ -188,9 +188,9 @@ export Mesh
     Mesh(tcomp::TriangulatedComplex{N}, center::Function) where N
 
 A pair of TriangulatedComplexes representing a primal and dual pair. The second constructor
-takes a primal TriangulatedComplex and a function `center` that takes a Simplex{N, K} to a
-Barycentric{N, K} (e.g. the circumcenter or centroid) and returns the corresponding dual
-TriangulatedComplex.
+takes a primal TriangulatedComplex and a function `center` that takes simplex cells as
+`Simplex{N, K}` and general cells as `Cell{N}` (e.g. the circumcenter or centroid), and
+returns the corresponding dual TriangulatedComplex.
 """
 struct Mesh{N,K}
     primal::TriangulatedComplex{N,K}
