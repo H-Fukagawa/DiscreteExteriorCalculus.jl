@@ -7,7 +7,7 @@ function Point(coords::AbstractVector{<:Real})
     return Point{N}(SVector{N, Float64}(coords))
 end
 
-Point(coords::Vararg{<:Real}) = Point(collect(coords))
+Point(coords::Real...) = Point(collect(coords))
 
 Point(b::Barycentric) = Point(barycentric_matrix(b.simplex) * b.coords)
 
@@ -50,7 +50,7 @@ function Barycentric(s::Simplex{N, K}, coords::AbstractVector{<:Real}) where {N,
     return Barycentric{N, K}(s, SVector{K, Float64}(coords))
 end
 
-Barycentric(s::Simplex, coords::Vararg{<:Real}) = Barycentric(s, collect(coords))
+Barycentric(s::Simplex, coords::Real...) = Barycentric(s, collect(coords))
 
 """
     Barycentric(m::Metric{N}, s::Simplex{N}, p::Point{N}) where N

@@ -8,7 +8,7 @@ export Point
 """
     Point{N}(coords::SVector{N, Float64}) where N
     Point(coords::AbstractVector{<:Real})
-    Point(coords::Vararg{<:Real})
+    Point(coords::Real...)
     Point(b::Barycentric)
     Point(b::SimpleBarycentric)
 
@@ -76,7 +76,7 @@ export Barycentric
 """
     Barycentric{N, K}(s::Simplex{N, K}, coords::SVector{K, Float64}) where {N, K}
     Barycentric(s::Simplex{N, K}, coords::AbstractVector{<:Real}) where {N, K}
-    Barycentric(s::Simplex, coords::Vararg{<:Real})
+    Barycentric(s::Simplex, coords::Real...)
     Barycentric(b::SimpleBarycentric)
 
 A representation of a point with respect to a simplex using barycentric coordinates. If the
