@@ -408,3 +408,34 @@ end
     # Ratio over 2× refinement should be ≈4 for clean h². Allow ≥3.5.
     @test es[1] / es[2] > 3.5
 end
+
+@testset "galerkin_laplacian high-level API on hex mesh" begin
+    m = Metric(3)
+    tcomp = _hex_lattice_unit(4)
+    orient!(tcomp.complex)
+    M0, K = galerkin_laplacian(m, tcomp)
+    n_v = length(tcomp.complex.cells[1])
+    @test size(M0) == (n_v, n_v)
+    @test size(K)  == (n_v, n_v)
+    # K is symmetric and positive semi-definite (constant null space).
+    @test K ≈ transpose(K)
+    @test minimum(eigvals(Symmetric(Matrix(K)))) > -1e-10
+    @test norm(K * ones(n_v)) < 1e-10
+
+    # Solve Poisson and verify h² (n=4 vs n=8).
+    function err(n)
+        tc = _hex_lattice_unit(n)
+        orient!(tc.complex)
+        M0, K = galerkin_laplacian(m, tc)
+        verts = tc.complex.cells[1]
+        u_ex = [sin(π*v.points[1].coords[1]) * sin(π*v.points[1].coords[2]) *
+                sin(π*v.points[1].coords[3]) for v in verts]
+        f = 3 * π^2 .* u_ex
+        _, ext = DEC.boundary_components_connected(tc.complex)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        u_int = K[int_idx, int_idx] \ (M0 * f)[int_idx]
+        return norm(u_int - u_ex[int_idx]) / sqrt(length(int_idx))
+    end
+    @test err(4) / err(8) > 3.5
+end

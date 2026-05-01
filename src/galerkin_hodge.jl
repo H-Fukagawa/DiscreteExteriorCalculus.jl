@@ -124,16 +124,21 @@ boundary-value problem solve `K · u = M_0 · f` after applying boundary
 conditions; for the eigenproblem solve `K v = λ M_0 v`.
 
 `comp_or_tcomp` may be a `CellComplex` (must be simplicial) or a
-`TriangulatedComplex` (uses sub-tet Whitney forms; currently only for
-simplicial primal complex, since `M_1` is not yet defined on polytope
-edges).
+`TriangulatedComplex`. The `TriangulatedComplex` version dispatches
+through `galerkin_hodge(m, tcomp, 2)`, which currently supports
+simplicial meshes (any) and axis-aligned hex meshes (Nédélec).
 """
 galerkin_stiffness(m::Metric, comp::CellComplex) =
     transpose(exterior_derivative(comp, 1)) * galerkin_hodge(m, comp, 2) *
     exterior_derivative(comp, 1)
 
-galerkin_stiffness(m::Metric, tcomp::TriangulatedComplex) =
-    galerkin_stiffness(m, tcomp.complex)
+# For TriangulatedComplex: use the polytope-aware `galerkin_hodge(m, tcomp, 2)`
+# (which dispatches to hex Nédélec for hex meshes, etc.), NOT the simplicial-
+# only CellComplex path. d_0 is structural and works on either complex type.
+function galerkin_stiffness(m::Metric, tcomp::TriangulatedComplex)
+    d0 = exterior_derivative(tcomp.complex, 1)
+    return transpose(d0) * galerkin_hodge(m, tcomp, 2) * d0
+end
 
 """
     galerkin_laplacian(m, comp_or_tcomp) -> (M_0, K)
@@ -150,7 +155,7 @@ function galerkin_laplacian(m::Metric, comp::CellComplex)
 end
 
 galerkin_laplacian(m::Metric, tcomp::TriangulatedComplex) =
-    galerkin_laplacian(m, tcomp.complex)
+    (galerkin_hodge(m, tcomp, 1), galerkin_stiffness(m, tcomp))
 
 export galerkin_hodge_laplacian_block
 """
