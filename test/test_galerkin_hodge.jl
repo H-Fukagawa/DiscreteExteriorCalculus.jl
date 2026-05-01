@@ -550,3 +550,53 @@ end
     end
     @test err(4) / err(8) > 3.5
 end
+
+# ============================================================================
+# Oblique (non-right) prism via the trilinear isoparametric mapping. Each
+# layer is shifted in (x, y) so the "vertical" axis is tilted, giving an
+# oblique prism. The Whitney 1-form mass uses Gauss-quadrature over the
+# reference unit prism (3-pt triangle × 2-pt z); for axis-aligned right
+# prisms this reproduces the closed-form result, for oblique prisms it is
+# O(h⁴) accurate and the resulting Poisson solve still hits clean h².
+# ============================================================================
+function _oblique_prism_lattice(n; α=0.2, β=0.1)
+    pts = Dict{NTuple{3,Int}, Point{3}}()
+    for i in 0:n, j in 0:n, k in 0:n
+        pts[(i,j,k)] = Point(i/n + α*k/n, j/n + β*k/n, k/n)
+    end
+    prisms = Vector{Vector{Point{3}}}()
+    for i in 0:n-1, j in 0:n-1, k in 0:n-1
+        c8 = [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+              pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+        push!(prisms, [c8[1], c8[2], c8[4], c8[5], c8[6], c8[8]])
+        push!(prisms, [c8[2], c8[3], c8[4], c8[6], c8[7], c8[8]])
+    end
+    return DEC.prismatic_complex(prisms)
+end
+
+@testset "galerkin_hodge: oblique prism — h² Poisson SOLVE" begin
+    m = Metric(3)
+    α, β = 0.2, 0.1
+    function err(n)
+        tcomp = _oblique_prism_lattice(n; α=α, β=β)
+        orient!(tcomp.complex)
+        M0, K = galerkin_laplacian(m, tcomp)
+        verts = tcomp.complex.cells[1]
+        u_at(p) = (let ξ = p[1] - α*p[3]; ηv = p[2] - β*p[3];
+                       sin(π*ξ) * sin(π*ηv) * sin(π*p[3]); end)
+        u_ex = [u_at(v.points[1].coords) for v in verts]
+        h = 1e-4
+        function lapu(p)
+            return (u_at([p[1]+h, p[2], p[3]]) - 2*u_at(p) + u_at([p[1]-h, p[2], p[3]])) / h^2 +
+                   (u_at([p[1], p[2]+h, p[3]]) - 2*u_at(p) + u_at([p[1], p[2]-h, p[3]])) / h^2 +
+                   (u_at([p[1], p[2], p[3]+h]) - 2*u_at(p) + u_at([p[1], p[2], p[3]-h])) / h^2
+        end
+        f = [-lapu(v.points[1].coords) for v in verts]
+        _, ext = DEC.boundary_components_connected(tcomp.complex)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        u_int = K[int_idx, int_idx] \ (M0 * f)[int_idx]
+        return norm(u_int - u_ex[int_idx]) / sqrt(length(int_idx))
+    end
+    @test err(4) / err(8) > 3.5
+end

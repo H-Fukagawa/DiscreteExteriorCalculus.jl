@@ -638,37 +638,106 @@ end
 # block (further block-2 × 2 in bottom/top) and a 3 × 3 vertical block.
 # All blocks reduce to scaled 2D triangle Whitney / P1 masses.
 #
-# Currently restricted to RIGHT prisms (top = bottom + (0,0,L)). General
-# oblique prisms would need an isoparametric mapping with quadrature.
+# Implementation: trilinear isoparametric mapping with 3-point triangle ×
+# 2-point z Gauss-Legendre quadrature on the reference unit prism. The
+# integrand is at most degree 2 in each reference variable for axis-aligned
+# right prisms, so quadrature is exact there; for oblique prisms (general
+# top triangle pose) it is O(h⁴) accurate, sufficient for h² overall.
+
+# Reference 2D Whitney 1-form on the unit triangle for edge (a, b) at
+# parametric (ξ, η). Triangle barycentric: λ_1 = 1−ξ−η, λ_2 = ξ, λ_3 = η.
+@inline function _ref_whitney_2d(a::Int, b::Int, ξ::Float64, η::Float64)
+    λa = a == 1 ? 1 - ξ - η : (a == 2 ? ξ : η)
+    λb = b == 1 ? 1 - ξ - η : (b == 2 ? ξ : η)
+    ga_x = a == 1 ? -1.0 : (a == 2 ? 1.0 : 0.0)
+    ga_y = a == 1 ? -1.0 : (a == 2 ? 0.0 : 1.0)
+    gb_x = b == 1 ? -1.0 : (b == 2 ? 1.0 : 0.0)
+    gb_y = b == 1 ? -1.0 : (b == 2 ? 0.0 : 1.0)
+    return (λa * gb_x - λb * ga_x, λa * gb_y - λb * ga_y)
+end
+
+# Reference prism Nédélec basis at (ξ, η, ζ) where (ξ, η) are unit-triangle
+# coords (λ_1=1−ξ−η, λ_2=ξ, λ_3=η) and ζ ∈ [0, 1]. Edges 1..3 = bottom
+# triangle in (1,2)/(1,3)/(2,3) order, 4..6 = top, 7..9 = vertical.
+@inline function _ref_prism_nedelec(α::Int, ξ::Float64, η::Float64, ζ::Float64)
+    if α <= 6
+        a, b = α == 1 || α == 4 ? (1, 2) : (α == 2 || α == 5 ? (1, 3) : (2, 3))
+        wx, wy = _ref_whitney_2d(a, b, ξ, η)
+        scale = α <= 3 ? (1 - ζ) : ζ
+        return (scale * wx, scale * wy, 0.0)
+    else
+        i = α - 6           # 1, 2, or 3
+        λi = i == 1 ? 1 - ξ - η : (i == 2 ? ξ : η)
+        return (0.0, 0.0, λi)
+    end
+end
+
+# Trilinear shape-function gradients on the reference unit prism.
+# χ(ξ, η, ζ) = Σ N_i p_i with
+#   N_1 = (1−ξ−η)(1−ζ),  N_2 = ξ(1−ζ),  N_3 = η(1−ζ),
+#   N_4 = (1−ξ−η)ζ,      N_5 = ξζ,      N_6 = ηζ.
+@inline function _prism_shape_grad(i::Int, ξ::Float64, η::Float64, ζ::Float64)
+    if i == 1
+        return (-(1-ζ), -(1-ζ), -(1-ξ-η))
+    elseif i == 2
+        return ((1-ζ), 0.0, -ξ)
+    elseif i == 3
+        return (0.0, (1-ζ), -η)
+    elseif i == 4
+        return (-ζ, -ζ, (1-ξ-η))
+    elseif i == 5
+        return (ζ, 0.0, ξ)
+    else  # i == 6
+        return (0.0, ζ, η)
+    end
+end
+
+# 3-point Gauss for the unit triangle (exact for degree 2). Volume 1/2.
+const _GAUSS_TRI_3PT   = ((1/6, 1/6), (4/6, 1/6), (1/6, 4/6))
+const _GAUSS_TRI_3PT_W = (1/6, 1/6, 1/6)
 
 function _prism_local_mass_1form(::Metric{3}, prism_points::Vector{Point{3}})
     @assert length(prism_points) == 6 "prism must have exactly 6 vertices"
-    p_bot = prism_points[1:3]
-    p_top = prism_points[4:6]
-    L = p_top[1].coords[3] - p_bot[1].coords[3]
-    @assert L > 0 "prism must extrude in +z direction"
-    for i in 1:3
-        Δz = p_top[i].coords[3] - p_bot[i].coords[3]
-        @assert isapprox(Δz, L; atol=1e-10) "prism extrusion not uniform at vertex $(i + 3)"
-        @assert isapprox(p_top[i].coords[1], p_bot[i].coords[1]; atol=1e-10) &&
-                isapprox(p_top[i].coords[2], p_bot[i].coords[2]; atol=1e-10) (
-            "prism extrusion not parallel to z at vertex $(i + 3)")
-    end
-
-    # 2D triangle (drop z-coordinate) for the Whitney 1-form mass and P1 mass.
-    s_2d = Simplex([Point(p.coords[1], p.coords[2]) for p in p_bot])
-    M_T1, edge_pairs_2d = _local_mass_1form(Metric(2), s_2d)  # 3 × 3
-    M_T0 = _local_mass_0form(Metric(2), s_2d)                  # 3 × 3
-
     Mloc = zeros(9, 9)
-    Mloc[1:3, 1:3] = (L / 3) * M_T1   # bottom-bottom
-    Mloc[1:3, 4:6] = (L / 6) * M_T1   # bottom-top
-    Mloc[4:6, 1:3] = (L / 6) * M_T1   # top-bottom (symmetric)
-    Mloc[4:6, 4:6] = (L / 3) * M_T1   # top-top
-    Mloc[7:9, 7:9] = (1 / L) * M_T0   # vertical-vertical
+    Jbuf = zeros(3, 3)
+    for tri in 1:3
+        ξ_t, η_t = _GAUSS_TRI_3PT[tri]
+        w_tri = _GAUSS_TRI_3PT_W[tri]
+        for zi in 1:2
+            ζ = _GAUSS_2PT[zi]
+            w_z = _GAUSS_2PT_W[zi]
+            w = w_tri * w_z
 
-    bot_pairs  = [Tuple(p) for p in edge_pairs_2d]                     # (i, j) with i<j in 1..3
-    top_pairs  = [(p[1] + 3, p[2] + 3) for p in edge_pairs_2d]         # 4..6
+            fill!(Jbuf, 0.0)
+            for i in 1:6
+                dξ, dη, dζ = _prism_shape_grad(i, ξ_t, η_t, ζ)
+                pi_coords = prism_points[i].coords
+                for k in 1:3
+                    Jbuf[k, 1] += dξ * pi_coords[k]
+                    Jbuf[k, 2] += dη * pi_coords[k]
+                    Jbuf[k, 3] += dζ * pi_coords[k]
+                end
+            end
+            detJ = Jbuf[1,1]*(Jbuf[2,2]*Jbuf[3,3] - Jbuf[2,3]*Jbuf[3,2]) -
+                   Jbuf[1,2]*(Jbuf[2,1]*Jbuf[3,3] - Jbuf[2,3]*Jbuf[3,1]) +
+                   Jbuf[1,3]*(Jbuf[2,1]*Jbuf[3,2] - Jbuf[2,2]*Jbuf[3,1])
+            @assert detJ > 1e-14 "prism Jacobian non-positive ($detJ); check vertex ordering"
+            Jinv = inv(Jbuf)
+            Mc = Jinv * transpose(Jinv)
+
+            φref = ntuple(α -> _ref_prism_nedelec(α, ξ_t, η_t, ζ), 9)
+            wj = w * detJ
+            for α in 1:9, β in 1:9
+                va = φref[α]; vb = φref[β]
+                Mca1 = Mc[1,1]*va[1] + Mc[1,2]*va[2] + Mc[1,3]*va[3]
+                Mca2 = Mc[2,1]*va[1] + Mc[2,2]*va[2] + Mc[2,3]*va[3]
+                Mca3 = Mc[3,1]*va[1] + Mc[3,2]*va[2] + Mc[3,3]*va[3]
+                Mloc[α, β] += wj * (Mca1 * vb[1] + Mca2 * vb[2] + Mca3 * vb[3])
+            end
+        end
+    end
+    bot_pairs  = [(1, 2), (1, 3), (2, 3)]
+    top_pairs  = [(4, 5), (4, 6), (5, 6)]
     vert_pairs = [(1, 4), (2, 5), (3, 6)]
     edge_pairs = vcat(bot_pairs, top_pairs, vert_pairs)
     return Mloc, edge_pairs
