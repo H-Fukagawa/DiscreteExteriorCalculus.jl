@@ -1,7 +1,32 @@
 using Test, DiscreteExteriorCalculus
 const DEC = DiscreteExteriorCalculus
-using LinearAlgebra: I, norm
+using LinearAlgebra: I, dot, norm
 using SparseArrays: sparse, spzeros
+
+# Kuhn (Coxeter–Freudenthal) triangulation of a unit cube into 6 tetrahedra,
+# all sharing the diagonal vertex 1 → vertex 7.
+const _KUHN_TETS = ((1,2,3,7), (1,3,4,7), (1,4,8,7),
+                    (1,8,5,7), (1,5,6,7), (1,6,2,7))
+
+# Build a structured tetrahedral lattice over the parallelepiped spanned by
+# v1, v2, v3 with n×n×n boxes. Returns a `TriangulatedComplex{3, 4}`.
+function _tet_lattice(v1, v2, v3, n)
+    pts = Dict{NTuple{3,Int}, Point{3}}()
+    for i in 0:n, j in 0:n, k in 0:n
+        c = (i/n) .* v1 .+ (j/n) .* v2 .+ (k/n) .* v3
+        pts[(i,j,k)] = Point(c[1], c[2], c[3])
+    end
+    simplices = Simplex{3, 4}[]
+    for i in 0:n-1, j in 0:n-1, k in 0:n-1
+        corners = [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+                   pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+        for tup in _KUHN_TETS
+            push!(simplices, Simplex(corners[tup[1]], corners[tup[2]],
+                                     corners[tup[3]], corners[tup[4]]))
+        end
+    end
+    return TriangulatedComplex(simplices)
+end
 
 @testset "circumcenter_hodge and exterior_derivative" begin
     # setup
@@ -201,7 +226,7 @@ end
     @test err_nono[2] < err_diag[2]
 end
 
-@testset "corrected_barycentric_hodge dispatch" begin
+@testset "corrected_barycentric_hodge dispatch (2D)" begin
     m = Metric(2)
     _, tcomp = DEC.triangulated_lattice([1.0, 0.0], [0.3, 0.85], 5, 5)
     orient!(tcomp.complex)
@@ -212,6 +237,87 @@ end
         DEC.nonorthogonal_hodge(m, mesh)
     # Falls back to diagonal barycentric_hodge for other (k, primal)
     for (k, primal) in [(1, true), (3, true), (1, false), (2, false), (3, false)]
+        @test DEC.corrected_barycentric_hodge(m, mesh, k, primal) ==
+            DEC.barycentric_hodge(m, mesh, k, primal)
+    end
+end
+
+@testset "nonorthogonal_hodge: exact flux for linear u in 3D" begin
+    m = Metric(3)
+    tcomp = _tet_lattice([1.0, 0.0, 0.0], [0.2, 1.0, 0.0], [0.1, 0.15, 1.0], 4)
+    orient!(tcomp.complex)
+    mesh = Mesh(tcomp, centroid)
+
+    verts = mesh.primal.complex.cells[1]
+    edges = mesh.primal.complex.cells[2]
+    grad = [2.0, 3.0, -1.5]
+    u_vec = [grad[1] * v.points[1].coords[1] +
+             grad[2] * v.points[1].coords[2] +
+             grad[3] * v.points[1].coords[3] for v in verts]
+    omega = DEC.exterior_derivative(mesh.primal.complex, 1) * u_vec
+
+    true_flux = [let de = DEC._primal_edge_vector(e),
+                     S = DEC._dual_face_area_vector(mesh, e, de)
+                     dot(S, grad)
+                 end for e in edges]
+
+    flux_diag = DEC.barycentric_hodge(m, mesh, 2, true) * omega
+    flux_nono = DEC.nonorthogonal_hodge(m, mesh) * omega
+
+    @test norm(flux_nono - true_flux) / norm(true_flux) < 1e-12
+    @test norm(flux_diag - true_flux) / norm(true_flux) > 0.05
+end
+
+@testset "nonorthogonal_hodge: 3D Laplacian consistency on skewed tet mesh" begin
+    # u = sin(πx) sin(πy) sin(πz) on a skewed parallelepiped lattice.
+    # Δu = -3π² u. The diagonal Hodge stays inconsistent under refinement,
+    # the over-relaxed correction converges (≥1.5× reduction n=4 → n=8).
+    m = Metric(3)
+    function err_3d(n, hodge_fn)
+        tcomp = _tet_lattice([1.0, 0.0, 0.0], [0.2, 1.0, 0.0],
+                             [0.1, 0.15, 1.0], n)
+        orient!(tcomp.complex)
+        mesh = Mesh(tcomp, centroid)
+        d0 = DEC.exterior_derivative(mesh.primal.complex, 1)
+        d1d = DEC.exterior_derivative(mesh.dual.complex, 3)
+        sNi = DEC.barycentric_hodge(m, mesh, 4, false)
+        L = sNi * d1d * hodge_fn(mesh) * d0
+
+        verts = mesh.primal.complex.cells[1]
+        u_vec = [sin(π * v.points[1].coords[1]) *
+                 sin(π * v.points[1].coords[2]) *
+                 sin(π * v.points[1].coords[3]) for v in verts]
+        f_ex = -3 * π^2 .* u_vec
+        _, ext = DEC.boundary_components_connected(mesh.primal.complex)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        return norm((L * u_vec - f_ex)[int_idx]) / sqrt(length(int_idx))
+    end
+
+    diag_h(mesh) = DEC.barycentric_hodge(m, mesh, 2, true)
+    nono_h(mesh) = DEC.nonorthogonal_hodge(m, mesh)
+
+    err_diag = [err_3d(n, diag_h) for n in [4, 8]]
+    err_nono = [err_3d(n, nono_h) for n in [4, 8]]
+
+    # Diagonal: inconsistent — error does not shrink.
+    @test err_diag[2] / err_diag[1] > 0.9
+    # Over-relaxed converges; require ≥1.5× reduction.
+    @test err_nono[1] / err_nono[2] > 1.5
+    @test err_nono[1] < err_diag[1]
+    @test err_nono[2] < err_diag[2]
+end
+
+@testset "corrected_barycentric_hodge dispatch (3D)" begin
+    m = Metric(3)
+    tcomp = _tet_lattice([1.0, 0.0, 0.0], [0.2, 1.0, 0.0], [0.1, 0.15, 1.0], 3)
+    orient!(tcomp.complex)
+    mesh = Mesh(tcomp, centroid)
+
+    @test DEC.corrected_barycentric_hodge(m, mesh, 2, true) ==
+        DEC.nonorthogonal_hodge(m, mesh)
+    for (k, primal) in [(1, true), (3, true), (4, true),
+                        (1, false), (2, false), (3, false), (4, false)]
         @test DEC.corrected_barycentric_hodge(m, mesh, k, primal) ==
             DEC.barycentric_hodge(m, mesh, k, primal)
     end

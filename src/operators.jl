@@ -139,11 +139,11 @@ function barycentric_hodge(m::Metric{N}, mesh::Mesh{N, K}, k::Int,
 end
 
 """
-    nonorthogonal_hodge(m::Metric{2}, mesh::Mesh{2, 3}) -> SparseMatrixCSC
+    nonorthogonal_hodge(m::Metric{N}, mesh::Mesh{N, K}) -> SparseMatrixCSC
 
-Hodge star for primal 1-forms (`★_1`) on a 2D mesh whose dual is built from
-non-orthogonal centers (e.g. centroids). Uses the OpenFOAM-style over-relaxed
-decomposition `S = E + T` with `E ∥ d`:
+Hodge star for primal 1-forms (`★_1`) on a 2D (`N=2, K=3`) or 3D (`N=3, K=4`)
+mesh whose dual is built from non-orthogonal centers (e.g. centroids). Uses
+the OpenFOAM-style over-relaxed decomposition `S = E + T` with `E ∥ d`:
 
     flux_e = α_or · (u_N − u_P) + T_e · ½(g_{v_P} + g_{v_N})
 
@@ -153,24 +153,28 @@ gradient at vertex `v` reconstructed from incident edge values (same constructio
 as `sharp`). The result is a sparse `n_edges × n_edges` matrix; the diagonal
 entry coincides with `barycentric_hodge` on orthogonal meshes.
 
-The dual face area-vector is computed as the rotated chord between the two
-adjacent triangle centers (or between e_center and the single adjacent triangle
-for boundary edges). The orientation is fixed so that `S_e · d_e > 0`.
+In 2D, `S_e` is the rotated chord between the two adjacent triangle centers
+(or between `e_center` and the single adjacent triangle for boundary edges).
+In 3D, `S_e` accumulates ½(v₁ × v₂) over the triangular elementary duals
+`[e_center, t_center, tet_center]` — equivalent to the area integral of the
+oriented dual face. In both cases the orientation is fixed so `S_e · d_e > 0`.
 """
-function nonorthogonal_hodge(m::Metric{2}, mesh::Mesh{2, 3})
+function nonorthogonal_hodge(m::Metric{N}, mesh::Mesh{N, K}) where {N, K}
+    @assert (N == 2 && K == 3) || (N == 3 && K == 4) (
+        "nonorthogonal_hodge supports only 2D (N=2,K=3) and 3D (N=3,K=4)")
     primal_comp = mesh.primal.complex
     edges = primal_comp.cells[2]
     n_edges = length(edges)
 
     # Per-vertex gradient reconstruction matrices (matches `sharp`)
-    vertex_grad = Dict{Cell{2}, Matrix{Float64}}()
-    vertex_edges = Dict{Cell{2}, Vector{Cell{2}}}()
+    vertex_grad = Dict{Cell{N}, Matrix{Float64}}()
+    vertex_edges = Dict{Cell{N}, Vector{Cell{N}}}()
     for v in primal_comp.cells[1]
         inc = collect(keys(v.parents))
         if isempty(inc)
             continue
         end
-        mat = zeros(length(inc), 2)
+        mat = zeros(length(inc), N)
         for (i, e) in enumerate(inc)
             mat[i, :] = sum(x.points[1].coords * (2 * x.parents[e] - 1)
                 for x in e.children)
@@ -208,14 +212,14 @@ end
 """
     corrected_barycentric_hodge(m::Metric{N}, mesh::Mesh{N, K}, k::Int, primal::Bool)
 
-Hodge star with non-orthogonality correction. For 2D primal `k=2` (the only
-case where centroidal-dual non-orthogonality enters the standard Laplacian),
-returns `nonorthogonal_hodge`. For all other `(k, primal)` combinations,
-falls back to the diagonal `barycentric_hodge`.
+Hodge star with non-orthogonality correction. For primal `k=2` in 2D or 3D
+(the case where centroidal-dual non-orthogonality enters the standard
+Laplacian on 0-forms), returns `nonorthogonal_hodge`. For all other
+`(k, primal)` combinations, falls back to the diagonal `barycentric_hodge`.
 """
 function corrected_barycentric_hodge(m::Metric{N}, mesh::Mesh{N, K}, k::Int,
     primal::Bool) where {N, K}
-    if N == 2 && K == 3 && k == 2 && primal
+    if k == 2 && primal && ((N == 2 && K == 3) || (N == 3 && K == 4))
         return nonorthogonal_hodge(m, mesh)
     end
     return barycentric_hodge(m, mesh, k, primal)
@@ -256,6 +260,36 @@ function _dual_face_area_vector(mesh::Mesh{2, 3}, e::Cell{2},
 
     S = SVector{2, Float64}(-chord[2], chord[1])
     return dot(S, d_e) < 0 ? -S : S
+end
+
+# Dual face area-vector for a primal edge in 3D. The dual face is a (possibly
+# non-planar) polygon fan-triangulated from `e_center`; each elementary dual is
+# the triangle `[e_center, triangle_center, tet_center]`. The sign convention
+# stored in `mesh.dual.simplices` is chosen for *volume* sums and does not
+# orient cross products consistently, so each triangle's normal is independently
+# aligned with `d_e` (which is roughly perpendicular to the dual face) before
+# summing. For planar dual faces this is exact; for mildly non-planar duals
+# it gives the area vector projected onto the half-space defined by `d_e`.
+function _dual_face_area_vector(mesh::Mesh{3, 4}, e::Cell{3},
+    d_e::SVector{3, Float64})
+    de_cell = dual(mesh, e)
+    elems = mesh.dual.simplices[de_cell]
+    S = zero(SVector{3, Float64})
+    for (s, _) in elems
+        @assert length(s.points) == 3
+        v1 = s.points[2].coords - s.points[1].coords
+        v2 = s.points[3].coords - s.points[1].coords
+        cross_v = SVector{3, Float64}(
+            v1[2] * v2[3] - v1[3] * v2[2],
+            v1[3] * v2[1] - v1[1] * v2[3],
+            v1[1] * v2[2] - v1[2] * v2[1],
+        )
+        if dot(cross_v, d_e) < 0
+            cross_v = -cross_v
+        end
+        S = S + 0.5 * cross_v
+    end
+    return S
 end
 
 """
