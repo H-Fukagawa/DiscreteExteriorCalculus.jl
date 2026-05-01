@@ -141,17 +141,21 @@ end
 """
     nonorthogonal_hodge(m::Metric{N}, mesh::Mesh{N, K}) -> SparseMatrixCSC
 
-Hodge star for primal 1-forms (`★_1`) on a 2D (`N=2, K=3`) or 3D (`N=3, K=4`)
+Hodge star for primal 1-forms (`★_2`) on a 2D (`N=2, K=3`) or 3D (`N=3, K=4`)
 mesh whose dual is built from non-orthogonal centers (e.g. centroids). Uses
 the OpenFOAM-style over-relaxed decomposition `S = E + T` with `E ∥ d`:
 
-    flux_e = α_or · (u_N − u_P) + T_e · ½(g_{v_P} + g_{v_N})
+    flux_e = α_or · (u_N − u_P) + T_e · (1/n_cells) Σ_C g_C
 
 where `d_e` is the primal edge vector, `S_e` the dual face area-vector,
-`α_or = (S·S)/(S·d)`, `T_e = S_e − α_or · d_e`, and `g_v` is the least-squares
-gradient at vertex `v` reconstructed from incident edge values (same construction
-as `sharp`). The result is a sparse `n_edges × n_edges` matrix; the diagonal
-entry coincides with `barycentric_hodge` on orthogonal meshes.
+`α_or = (S·S)/(S·d)`, `T_e = S_e − α_or · d_e`, and `g_C` is the per-cell
+"Diamond scheme" gradient: the unique vector such that `(v_j − v_i) · g_C`
+matches the edge value `ω_{ij}` for each edge of the top-dim cell `C`. The
+sum runs over the (up to 2 in 2D / many in 3D) primal top-dim cells incident
+to edge `e`. The result is a sparse `n_edges × n_edges` matrix; the diagonal
+entry coincides with `barycentric_hodge` on orthogonal meshes, and the full
+operator is exact for linear `u` and second-order accurate for smooth `u`
+(versus the first-order vertex-LS reconstruction used previously).
 
 In 2D, `S_e` is the rotated chord between the two adjacent triangle centers
 (or between `e_center` and the single adjacent triangle for boundary edges).
@@ -165,30 +169,29 @@ function nonorthogonal_hodge(m::Metric{N}, mesh::Mesh{N, K}) where {N, K}
     primal_comp = mesh.primal.complex
     edges = primal_comp.cells[2]
     n_edges = length(edges)
+    top_cells = primal_comp.cells[K]
 
-    # Edge → column index, looked up once per incident-edge contribution.
     edge_idx = Dict{Cell{N}, Int}()
     sizehint!(edge_idx, n_edges)
     for (i, e) in enumerate(edges)
         edge_idx[e] = i
     end
 
-    # Per-vertex gradient reconstruction matrices (matches `sharp`).
-    # Store edge column indices directly so the assembly loop stays O(1) per entry.
-    vertex_grad = Dict{Cell{N}, Matrix{Float64}}()
-    vertex_edge_cols = Dict{Cell{N}, Vector{Int}}()
-    for v in primal_comp.cells[1]
-        inc = collect(keys(v.parents))
-        if isempty(inc)
-            continue
+    # Per top-dim cell: column indices of its edges + linear-interpolant
+    # gradient reconstruction matrix (Diamond scheme). For a cell with edge
+    # vectors arranged as rows of `mat`, `pinv(mat * m.mat)` is the matrix
+    # G such that `g_C = G · ω_{edges of C}` is the constant gradient of
+    # the unique linear interpolant on C — exact when ω = du.
+    cell_grad = Dict{Cell{N}, Matrix{Float64}}()
+    cell_edge_cols = Dict{Cell{N}, Vector{Int}}()
+    for c in top_cells
+        es = _cell_edges(c)
+        cell_edge_cols[c] = [edge_idx[e] for e in es]
+        mat = zeros(length(es), N)
+        for (i, e) in enumerate(es)
+            mat[i, :] = _primal_edge_vector(e)
         end
-        mat = zeros(length(inc), N)
-        for (i, e) in enumerate(inc)
-            mat[i, :] = sum(x.points[1].coords * (2 * x.parents[e] - 1)
-                for x in e.children)
-        end
-        vertex_grad[v] = pinv(mat * m.mat)
-        vertex_edge_cols[v] = [edge_idx[e] for e in inc]
+        cell_grad[c] = pinv(mat * m.mat)
     end
 
     rows, cols, vals = Int[], Int[], Float64[]
@@ -203,17 +206,58 @@ function nonorthogonal_hodge(m::Metric{N}, mesh::Mesh{N, K}) where {N, K}
 
         push!(rows, i); push!(cols, i); push!(vals, α_or)
 
-        for v in e.children
-            G = vertex_grad[v]
-            cols_v = vertex_edge_cols[v]
+        cells_for_e = _top_cells_containing(e)
+        weight = 1.0 / length(cells_for_e)
+        for c in cells_for_e
+            G = cell_grad[c]
+            cols_c = cell_edge_cols[c]
             coef = vec(transpose(T_e) * G)
-            for (j, col) in enumerate(cols_v)
-                push!(rows, i); push!(cols, col); push!(vals, 0.5 * coef[j])
+            for (j, col) in enumerate(cols_c)
+                push!(rows, i); push!(cols, col); push!(vals, weight * coef[j])
             end
         end
     end
 
     return sparse(rows, cols, vals, n_edges, n_edges)
+end
+
+# Edges (1-cells, K=2) belonging to a primal cell, with deduplication.
+function _cell_edges(c::Cell{N}) where N
+    if c.K == 2
+        return Cell{N}[c]
+    end
+    seen = Set{Cell{N}}()
+    function recurse(x)
+        if x.K == 2
+            push!(seen, x)
+        else
+            for ch in x.children
+                recurse(ch)
+            end
+        end
+    end
+    recurse(c)
+    return collect(seen)
+end
+
+# Primal top-dim cells (K = N+1) that contain a given lower-dim cell.
+function _top_cells_containing(c::Cell{N}) where N
+    K = N + 1
+    if c.K == K
+        return Cell{N}[c]
+    end
+    seen = Set{Cell{N}}()
+    function recurse(x)
+        if x.K == K
+            push!(seen, x)
+        else
+            for p in keys(x.parents)
+                recurse(p)
+            end
+        end
+    end
+    recurse(c)
+    return collect(seen)
 end
 
 """

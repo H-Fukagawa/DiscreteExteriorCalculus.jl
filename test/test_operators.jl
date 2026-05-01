@@ -219,11 +219,60 @@ end
 
     # Diagonal: inconsistent — barely changes under refinement.
     @test err_diag[2] / err_diag[1] > 0.9
-    # Over-relaxed: at least 3× reduction when h halves (close to 2nd order).
-    @test err_nono[1] / err_nono[2] > 3.0
+    # Over-relaxed with Diamond scheme: clean h² convergence (≥3.5× reduction).
+    @test err_nono[1] / err_nono[2] > 3.5
     # Over-relaxed beats diagonal at every resolution.
     @test err_nono[1] < err_diag[1]
     @test err_nono[2] < err_diag[2]
+end
+
+@testset "nonorthogonal_hodge: 2D 1-form Laplacian convergence" begin
+    # ω = du for u = sin(πx)sin(πy). Then Δω = d(Δu) = -2π² ω, and δdω = 0
+    # discretely (via d² = 0), so the full 1-form Laplacian equals dδω alone.
+    # In 2D K=3, dδω is composed as
+    #     dδω = d_1 · ★_3_dual · d_dual_2 · ★_2_primal · ω
+    # where ★_2_primal is the only non-trivial Hodge (★_3_dual = 1/CV_volume,
+    # ★_1 = vertex CV volume — both diagonal). With the corrected ★_2 the
+    # operator is exact for linear u and shows fast convergence; the diagonal
+    # ★_2 leaves an O(h) per-edge error.
+    m = Metric(2)
+    function dδ_err(n, hodge_fn)
+        _, tcomp = DEC.triangulated_lattice([1.0, 0.0], [0.3, 0.85], n, n)
+        orient!(tcomp.complex)
+        mesh = Mesh(tcomp, centroid)
+        primal = mesh.primal.complex
+        s2p = hodge_fn(mesh)
+        s3d = DEC.barycentric_hodge(m, mesh, 3, false)
+        d1 = DEC.exterior_derivative(primal, 1)
+        dd2 = DEC.exterior_derivative(mesh.dual.complex, 2)
+        L = d1 * s3d * dd2 * s2p
+
+        verts = primal.cells[1]
+        edges = primal.cells[2]
+        u_vec = [sin(π * v.points[1].coords[1]) * sin(π * v.points[1].coords[2])
+                 for v in verts]
+        ω = d1 * u_vec
+        f_ex = -2 * π^2 .* ω
+        _, ext = DEC.boundary_components_connected(primal)
+        bnd = Set(ext.cells[1])
+        int_e = [i for (i, e) in enumerate(edges)
+                 if all(!(c in bnd) for c in e.children)]
+        return norm((L * ω - f_ex)[int_e]) / sqrt(length(int_e))
+    end
+
+    diag_h(mesh) = DEC.barycentric_hodge(m, mesh, 2, true)
+    nono_h(mesh) = DEC.nonorthogonal_hodge(m, mesh)
+
+    err_diag = [dδ_err(n, diag_h) for n in [8, 16]]
+    err_nono = [dδ_err(n, nono_h) for n in [8, 16]]
+
+    # Diagonal: only h¹ from the d_1 wrap (1.87 measured).
+    @test 1.5 < err_diag[1] / err_diag[2] < 2.5
+    # Corrected: roughly h³ from cancellation in d_1 ∘ L_0form (≥5× per halving).
+    @test err_nono[1] / err_nono[2] > 5.0
+    # Corrected always wins.
+    @test err_nono[1] < 0.2 * err_diag[1]
+    @test err_nono[2] < 0.1 * err_diag[2]
 end
 
 @testset "corrected_barycentric_hodge dispatch (2D)" begin
