@@ -206,4 +206,5 @@ include("orientation.jl")
 include("mesh.jl")
 include("operators.jl")
 include("constraints.jl")
+include("galerkin_hodge.jl")
 end
