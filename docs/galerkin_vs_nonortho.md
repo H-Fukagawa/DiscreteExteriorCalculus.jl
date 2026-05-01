@@ -166,18 +166,40 @@ formulation in both 2D and 3D simplicial meshes.
 
 ## Polytope (hex / prism / pyramid) `k > 1` Galerkin Hodge
 
-**Status: not implemented** in the current Galerkin branch. The
-sub-tet Whitney 1-form / 2-form basis includes face-diagonal and
-body-diagonal edges/faces that aren't polytope cells, so a polytope-
-edge basis cannot be obtained by simple sum-over-sub-tets (the way
-the 0-form mass matrix is). A proper polytope-edge basis (trilinear
-hex Nedelec, prism / pyramid Nedelec variants) is needed.
+### Hex (axis-aligned): implemented
 
-This is a research-grade extension and would be its own follow-up
-(several hundred lines, including the various polytope-specific
-Whitney / Nedelec basis functions and their reference-element
-integrals).
+`galerkin_hodge(m, tcomp::TriangulatedComplex, 2)` for an axis-aligned
+hexahedral mesh now uses the lowest-order Nédélec edge element. The
+12 × 12 local mass matrix is block-diagonal in three axis groups of 4,
+each given in closed form by tensor products of `∫ ν_α ν_β dy = L · (1/3 if α==β else 1/6)`
+on the 1D linear hat functions.
 
-For polytope mesh applications today, the over-relaxed
-`nonorthogonal_hodge` is the only choice (it does support hex /
-prism / pyramid `★_2` for the 0-form Laplacian).
+Hex unit-cube Poisson SOLVE on a `n³` mesh:
+
+| n  | err   | rate  |
+|----|-------|-------|
+| 4  | 0.029 | -     |
+| 6  | 0.013 | ×2.26 |
+| 8  | 0.007 | ×1.83 |
+| 12 | 0.003 | ×2.35 |
+
+→ Clean h² convergence (×4 expected for h-halving, ×2.25 / ×1.78
+expected at n=4→6 / 6→8 — observed ×2.26 / ×1.83). Smaller absolute
+error than the Kuhn-tet Galerkin solve at matched `n` (1 hex per cube
+vs 6 Kuhn tets per cube), since the Nédélec basis on a hex is
+naturally aligned with the cube faces.
+
+### Prism / pyramid: not yet implemented
+
+A wedge-Nédélec basis (prism) and pyramidal-Nédélec basis (pyramid,
+known to be tricky due to the apex singularity — see Bedrosian or
+Gradinaru-Hiptmair) are next on the list. For mixed polytope meshes
+that combine prism / pyramid with tet, the over-relaxed
+`nonorthogonal_hodge` remains the only choice.
+
+### Non-axis-aligned hex: not yet implemented
+
+The current hex implementation assumes the hex's first vertex is the
+"bottom-left" corner and the edges align with positive `(x, y, z)`.
+General trilinear hexes (rotated, sheared, or with curved edges)
+require the isoparametric mapping with numerical quadrature.

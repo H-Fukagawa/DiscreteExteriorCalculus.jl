@@ -79,9 +79,12 @@ function galerkin_hodge(m::Metric{N}, tcomp::TriangulatedComplex{N, K},
     end
     if k == 1
         return _assemble_galerkin_polytope_0form(m, tcomp)
+    elseif k == 2 && N == 3 && K == 4
+        return _assemble_galerkin_hex_1form(m, tcomp)
     else
-        error("galerkin_hodge with TriangulatedComplex supports only k=1 " *
-              "for non-simplicial meshes; got k=$k")
+        error("galerkin_hodge with TriangulatedComplex supports k=1 " *
+              "for any polytope mesh, and k=2 for axis-aligned hex meshes only; " *
+              "got k=$k, N=$N, K=$K")
     end
 end
 
@@ -429,4 +432,130 @@ function _permutation_sign(from::Vector{Int}, to::Vector{Int})
         end
     end
     return Float64(sign)
+end
+
+# ============================================================================
+# Hex (lowest-order Nedelec) Whitney 1-form mass matrix.
+#
+# For an axis-aligned hex with side lengths Lx, Ly, Lz, there are 12 edges
+# split into 3 axis groups of 4. Within an axis group, the basis function for
+# the edge at perpendicular-plane corner (α, β) ∈ {0,1}² is
+#
+#     φ_e = (1/L_axis) · ν_α(perp1) · ν_β(perp2) · e_axis
+#
+# where ν_0(t) = 1 - t/L, ν_1(t) = t/L (linear hats over the axis-perpendicular
+# coordinate). The line integral ∫_e φ · t = 1 by construction.
+#
+# The 12 × 12 mass matrix is block-diagonal in the 3 axis groups (different-
+# axis edges are orthogonal vectors, so their inner product is zero).
+# Each axis block (4 × 4) is given in closed form by tensor products of
+# ∫ ν_α ν_β dy = L · (1/3 if α==β else 1/6).
+#
+# Currently restricted to AXIS-ALIGNED hexes (vertices in standard order
+# 1=(0,0,0), 2=(Lx,0,0), 3=(Lx,Ly,0), 4=(0,Ly,0), 5=(0,0,Lz), …). Non-axis-
+# aligned hexes need the trilinear isoparametric mapping, which requires
+# numerical quadrature and is left as future work.
+
+# Canonical local edge orientation: (from_local_idx, to_local_idx) such that
+# the geometric direction goes along +axis.
+const _HEX_X_EDGES = ((1, 2), (4, 3), (5, 6), (8, 7))
+const _HEX_Y_EDGES = ((1, 4), (2, 3), (5, 8), (6, 7))
+const _HEX_Z_EDGES = ((1, 5), (2, 6), (3, 7), (4, 8))
+
+# Perpendicular-plane corner labels (∈ {0,1}²) for each edge in each axis group.
+const _HEX_X_CORNERS = ((0, 0), (1, 0), (0, 1), (1, 1))  # (y_corner, z_corner)
+const _HEX_Y_CORNERS = ((0, 0), (1, 0), (0, 1), (1, 1))  # (x_corner, z_corner)
+const _HEX_Z_CORNERS = ((0, 0), (1, 0), (1, 1), (0, 1))  # (x_corner, y_corner)
+
+_int_hat(α::Int, β::Int, L::Float64) = (α == β) ? L / 3 : L / 6
+
+function _hex_local_mass_1form(::Metric{3}, hex_points::Vector{Point{3}})
+    @assert length(hex_points) == 8 "hex must have exactly 8 vertices"
+    p1 = hex_points[1].coords
+    p2 = hex_points[2].coords
+    p4 = hex_points[4].coords
+    p5 = hex_points[5].coords
+    Lx = p2[1] - p1[1]
+    Ly = p4[2] - p1[2]
+    Lz = p5[3] - p1[3]
+    @assert Lx > 0 && Ly > 0 && Lz > 0 "hex must be axis-aligned with positive side lengths"
+
+    Mloc = zeros(12, 12)
+    # x-edges (rows/cols 1..4)
+    for i in 1:4, j in 1:4
+        y_i, z_i = _HEX_X_CORNERS[i]
+        y_j, z_j = _HEX_X_CORNERS[j]
+        Mloc[i, j] = (1 / Lx) * _int_hat(y_i, y_j, Ly) * _int_hat(z_i, z_j, Lz)
+    end
+    # y-edges (5..8)
+    for i in 1:4, j in 1:4
+        x_i, z_i = _HEX_Y_CORNERS[i]
+        x_j, z_j = _HEX_Y_CORNERS[j]
+        Mloc[4 + i, 4 + j] = (1 / Ly) * _int_hat(x_i, x_j, Lx) * _int_hat(z_i, z_j, Lz)
+    end
+    # z-edges (9..12)
+    for i in 1:4, j in 1:4
+        x_i, y_i = _HEX_Z_CORNERS[i]
+        x_j, y_j = _HEX_Z_CORNERS[j]
+        Mloc[8 + i, 8 + j] = (1 / Lz) * _int_hat(x_i, x_j, Lx) * _int_hat(y_i, y_j, Ly)
+    end
+    edge_pairs = vcat(collect(_HEX_X_EDGES), collect(_HEX_Y_EDGES), collect(_HEX_Z_EDGES))
+    return Mloc, edge_pairs
+end
+
+# Global assembly for axis-aligned hex meshes. Errors out if the mesh
+# contains non-hex top-dim cells (mixed polytope mesh).
+function _assemble_galerkin_hex_1form(m::Metric{3}, tcomp::TriangulatedComplex{3, 4})
+    comp = tcomp.complex
+    n_e = length(comp.cells[2])
+
+    # Edge lookup by unordered vertex-Point pair.
+    edge_lookup = Dict{Set{Point{3}}, Cell{3}}()
+    for e in comp.cells[2]
+        edge_lookup[Set(c.points[1] for c in e.children)] = e
+    end
+    edge_idx = Dict{Cell{3}, Int}()
+    for (i, e) in enumerate(comp.cells[2])
+        edge_idx[e] = i
+    end
+
+    rows, cols, vals = Int[], Int[], Float64[]
+    for top in comp.cells[4]
+        if length(top.points) != 8
+            error("_assemble_galerkin_hex_1form: top-dim cell has $(length(top.points)) " *
+                  "vertices — only 8-vertex (hex) cells supported")
+        end
+
+        Mloc, edge_pairs = _hex_local_mass_1form(m, top.points)
+        # For each local edge, find global edge cell and its sign vs canonical orientation.
+        global_idx = Vector{Int}(undef, 12)
+        signs = Vector{Float64}(undef, 12)
+        for (α, (from_l, to_l)) in enumerate(edge_pairs)
+            p_from = top.points[from_l]
+            p_to   = top.points[to_l]
+            e = edge_lookup[Set([p_from, p_to])]
+            global_idx[α] = edge_idx[e]
+            # Determine global d_0 orientation
+            v_pos = nothing
+            v_neg = nothing
+            for vc in e.children
+                if vc.parents[e]
+                    v_pos = vc.points[1]
+                else
+                    v_neg = vc.points[1]
+                end
+            end
+            # Local canonical: from p_from to p_to.
+            # Global d_0: from v_neg to v_pos.
+            # Sign +1 if (v_neg, v_pos) == (p_from, p_to), else −1.
+            signs[α] = (v_neg == p_from && v_pos == p_to) ? 1.0 : -1.0
+        end
+
+        for i in 1:12, j in 1:12
+            push!(rows, global_idx[i])
+            push!(cols, global_idx[j])
+            push!(vals, signs[i] * signs[j] * Mloc[i, j])
+        end
+    end
+    return sparse(rows, cols, vals, n_e, n_e)
 end

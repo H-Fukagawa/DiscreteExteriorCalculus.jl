@@ -356,3 +356,55 @@ end
     @test es[1] / es[2] > 2.0
     @test es[2] / es[3] > 1.7
 end
+
+# ============================================================================
+# Hex Nedelec / Whitney 1-form on axis-aligned hexahedral meshes.
+# ============================================================================
+function _hex_lattice_unit(n)
+    pts = Dict{NTuple{3,Int}, Point{3}}()
+    for i in 0:n, j in 0:n, k in 0:n
+        pts[(i,j,k)] = Point(i/n, j/n, k/n)
+    end
+    hexes = Vector{Vector{Point{3}}}()
+    for i in 0:n-1, j in 0:n-1, k in 0:n-1
+        push!(hexes, [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+                      pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]])
+    end
+    return DEC.hexahedral_complex(hexes)
+end
+
+@testset "galerkin_hodge: hex Nedelec 1-form mass — structural" begin
+    m = Metric(3)
+    tcomp = _hex_lattice_unit(2)
+    orient!(tcomp.complex)
+    M1 = galerkin_hodge(m, tcomp, 2)
+    n_e = length(tcomp.complex.cells[2])
+    @test size(M1) == (n_e, n_e)
+    @test M1 ≈ transpose(M1)
+    @test minimum(eigvals(Symmetric(Matrix(M1)))) > 0
+end
+
+@testset "galerkin_hodge: hex Poisson SOLVE on unit cube reaches h²" begin
+    m = Metric(3)
+    function err(n)
+        tcomp = _hex_lattice_unit(n)
+        orient!(tcomp.complex)
+        comp = tcomp.complex
+        M0 = galerkin_hodge(m, tcomp, 1)
+        M1 = galerkin_hodge(m, tcomp, 2)
+        d0 = DEC.exterior_derivative(comp, 1)
+        K = transpose(d0) * M1 * d0
+        verts = comp.cells[1]
+        u_ex = [sin(π*v.points[1].coords[1]) * sin(π*v.points[1].coords[2]) *
+                sin(π*v.points[1].coords[3]) for v in verts]
+        f = 3 * π^2 .* u_ex
+        _, ext = DEC.boundary_components_connected(comp)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        u_int = K[int_idx, int_idx] \ (M0 * f)[int_idx]
+        return norm(u_int - u_ex[int_idx]) / sqrt(length(int_idx))
+    end
+    es = [err(n) for n in [4, 8]]
+    # Ratio over 2× refinement should be ≈4 for clean h². Allow ≥3.5.
+    @test es[1] / es[2] > 3.5
+end
