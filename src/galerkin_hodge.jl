@@ -149,6 +149,46 @@ end
 galerkin_laplacian(m::Metric, tcomp::TriangulatedComplex) =
     galerkin_laplacian(m, tcomp.complex)
 
+export galerkin_hodge_laplacian_block
+"""
+    galerkin_hodge_laplacian_block(m::Metric{N}, comp::CellComplex{N, K}, k::Int) where {N, K}
+
+Build the saddle-point (mixed-FEM) block matrix `A` and the corresponding
+right-hand-side mass matrix on the second block, for the Hodge Laplacian
+on `k-1` forms (the de Rham Laplacian `Δ_H = dδ + δd`).
+
+The mixed system finds `(σ, ω) ∈ V_{k-1} × V_k` such that:
+
+    M_{k-1} σ − d_{k-1}ᵀ M_k ω = 0
+    M_k d_{k-1} σ + d_kᵀ M_{k+1} d_k ω = M_k f
+
+i.e. `σ = δω` (auxiliary variable) and `dσ + δdω = f` ⟺ `Δ_H ω = f`.
+For `k = 2` (the 1-form Laplacian) this is the Hodge-Laplacian
+analogue of `Δω = f`.
+
+Returns `(A, M_k)` where `A` is the block matrix above.
+
+For `k = 1` (0-form Laplacian) the mixed formulation degenerates to the
+standard FEM stiffness; use `galerkin_laplacian` instead.
+"""
+function galerkin_hodge_laplacian_block(m::Metric{N}, comp::CellComplex{N, K},
+    k::Int) where {N, K}
+    @assert 2 <= k < K (
+        "galerkin_hodge_laplacian_block needs M_{k-1}, M_k, M_{k+1} — " *
+        "supported range is 2 ≤ k ≤ K-1, got k=$k, K=$K")
+    M_lower = galerkin_hodge(m, comp, k - 1)
+    M_mid   = galerkin_hodge(m, comp, k)
+    M_upper = galerkin_hodge(m, comp, k + 1)
+    d_lower = exterior_derivative(comp, k - 1)
+    d_upper = exterior_derivative(comp, k)
+
+    n_lower = size(M_lower, 1)
+    n_mid   = size(M_mid, 1)
+    A = [M_lower                  -transpose(d_lower) * M_mid;
+         M_mid * d_lower           transpose(d_upper) * M_upper * d_upper]
+    return (A, M_mid)
+end
+
 # Barycentric-coordinate gradients on a full-dim simplex.
 # Returns a Vector of (K = N+1) gradient SVectors, one per simplex vertex.
 # ∇λ_i is the Euclidean gradient of the i-th barycentric coordinate; it is

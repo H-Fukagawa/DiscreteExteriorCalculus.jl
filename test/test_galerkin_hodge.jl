@@ -268,3 +268,91 @@ end
     err_g = norm(u_g - u_ex[int_idx]) / sqrt(length(int_idx))
     @test err_g < 0.01  # h² with n=16, h=1/16 → h² ≈ 0.004
 end
+
+# ============================================================================
+# 1-form Hodge Laplacian via mixed-FEM (saddle-point) Galerkin.
+# Find (σ, ω) such that  M_0 σ − d_0' M_1 ω = 0  and
+#                        M_1 d_0 σ + d_1' M_2 d_1 ω = M_1 f.
+# Tests `galerkin_hodge_laplacian_block(m, comp, 2)` and verifies that the
+# discrete ω_h converges to the exact ω at edges. Tangential ω = 0 on the
+# unit-cube boundary for our manufactured ω_ex (every component contains a
+# `sin(π·)` that vanishes there).
+# ============================================================================
+@testset "galerkin_hodge_laplacian_block: 2D 1-form Hodge Laplacian" begin
+    m = Metric(2)
+    function err(n)
+        _, tcomp = DEC.triangulated_lattice([1.0, 0.0], [0.0, 1.0], n, n)
+        orient!(tcomp.complex)
+        comp = tcomp.complex
+        A, M_mid = galerkin_hodge_laplacian_block(m, comp, 2)
+        n_v = length(comp.cells[1]); n_e = length(comp.cells[2])
+        edges = comp.cells[2]
+
+        # ω_ex = sin(πx)sin(πy) (dx + dy); Δ_H ω = 2π² ω; tangential ω = 0 on ∂Ω.
+        function ω_edge(e)
+            v1, v2 = e.children
+            v_pos = v1.parents[e] ? v1 : v2
+            v_neg = v1.parents[e] ? v2 : v1
+            Δ   = v_pos.points[1].coords - v_neg.points[1].coords
+            mid = (v_pos.points[1].coords + v_neg.points[1].coords) / 2
+            s = sin(π * mid[1]) * sin(π * mid[2])
+            return s * (Δ[1] + Δ[2])
+        end
+        ω_ex = [ω_edge(e) for e in edges]
+        f_e  = 2 * π^2 .* ω_ex
+        rhs  = [zeros(n_v); M_mid * f_e]
+
+        _, ext = DEC.boundary_components_connected(comp)
+        bnd_e_set = Set(ext.cells[2])
+        bnd_e_idx = [i for (i, e) in enumerate(edges) if e in bnd_e_set]
+        int_e_idx = setdiff(1:n_e, bnd_e_idx)
+        free_idx = [collect(1:n_v); n_v .+ int_e_idx]
+        x = A[free_idx, free_idx] \ rhs[free_idx]
+        ω_h = zeros(n_e); ω_h[int_e_idx] = x[n_v + 1:end]
+        return norm(ω_h[int_e_idx] - ω_ex[int_e_idx]) / sqrt(length(int_e_idx))
+    end
+    es = [err(n) for n in [8, 16, 32]]
+    # ω convergence on regular skewed lattice: empirically ×8 (h³ super-conv).
+    # Conservatively assert ≥ ×3.5 (h²).
+    @test es[1] / es[2] > 3.5
+    @test es[2] / es[3] > 3.5
+end
+
+@testset "galerkin_hodge_laplacian_block: 3D Kuhn 1-form Hodge Laplacian" begin
+    m = Metric(3)
+    function err(n)
+        tcomp = _tet_lattice_3d([1.0,0,0], [0,1.0,0], [0,0,1.0], n)
+        orient!(tcomp.complex)
+        comp = tcomp.complex
+        A, M_mid = galerkin_hodge_laplacian_block(m, comp, 2)
+        n_v = length(comp.cells[1]); n_e = length(comp.cells[2])
+        edges = comp.cells[2]
+
+        # ω_ex = sin(πx)sin(πy)sin(πz) (dx+dy+dz); Δ_H ω = 3π² ω.
+        function ω_edge(e)
+            v1, v2 = e.children
+            v_pos = v1.parents[e] ? v1 : v2
+            v_neg = v1.parents[e] ? v2 : v1
+            Δ   = v_pos.points[1].coords - v_neg.points[1].coords
+            mid = (v_pos.points[1].coords + v_neg.points[1].coords) / 2
+            s = sin(π*mid[1]) * sin(π*mid[2]) * sin(π*mid[3])
+            return s * (Δ[1] + Δ[2] + Δ[3])
+        end
+        ω_ex = [ω_edge(e) for e in edges]
+        f_e  = 3 * π^2 .* ω_ex
+        rhs  = [zeros(n_v); M_mid * f_e]
+
+        _, ext = DEC.boundary_components_connected(comp)
+        bnd_e_set = Set(ext.cells[2])
+        bnd_e_idx = [i for (i, e) in enumerate(edges) if e in bnd_e_set]
+        int_e_idx = setdiff(1:n_e, bnd_e_idx)
+        free_idx = [collect(1:n_v); n_v .+ int_e_idx]
+        x = A[free_idx, free_idx] \ rhs[free_idx]
+        ω_h = zeros(n_e); ω_h[int_e_idx] = x[n_v + 1:end]
+        return norm(ω_h[int_e_idx] - ω_ex[int_e_idx]) / sqrt(length(int_e_idx))
+    end
+    es = [err(n) for n in [4, 6, 8]]
+    # 3D Kuhn — measured ≈h^{2.5}. Assert ≥ ×2.0 between consecutive sizes.
+    @test es[1] / es[2] > 2.0
+    @test es[2] / es[3] > 1.7
+end

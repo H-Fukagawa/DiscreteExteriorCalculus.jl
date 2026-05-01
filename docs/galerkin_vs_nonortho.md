@@ -129,3 +129,55 @@ The Galerkin numbers are produced by tests in
 the `nonorthogonal-hodge` branch with equivalent test code. Switching
 between branches reproduces the numbers above on the same problem
 geometry and manufactured solution.
+
+
+## Update: 1-form Hodge Laplacian via mixed Galerkin
+
+`galerkin_hodge_laplacian_block(m, comp, k)` builds the saddle-point
+mixed-FEM block for the de Rham Laplacian on `k-1` forms:
+
+    [M_{k-1}              -d_{k-1}ᵀ M_k        ] [σ]   [0    ]
+    [M_k d_{k-1}           d_kᵀ M_{k+1} d_k    ] [ω] = [M_k f]
+
+For 2D 1-form Δ_H on the unit square with `ω_ex = sin(πx)sin(πy)·(dx+dy)`:
+
+| n  | err_ω    | rate |
+|----|----------|------|
+| 8  | 6.5e-3   | -    |
+| 16 | 7.8e-4   | ×8.3 |
+| 32 | 9.8e-5   | ×8.0 |
+
+→ ×8 super-convergence (h³) — matches nonortho's measured rate on the
+same problem.
+
+For 3D Kuhn 1-form Δ_H on unit cube with `ω_ex = sin(πx)sin(πy)sin(πz)·(dx+dy+dz)`:
+
+| n | err_ω | rate |
+|---|-------|------|
+| 4 | 0.038 | -     |
+| 6 | 0.011 | ×3.4  |
+| 8 | 0.005 | ×2.4  |
+
+→ ≈ h^{2.5} convergence on Kuhn 3D. (h² rate would be ×2.25, ×1.78.)
+
+So 1-form Hodge Laplacian is fully accessible via the mixed Galerkin
+formulation in both 2D and 3D simplicial meshes.
+
+
+## Polytope (hex / prism / pyramid) `k > 1` Galerkin Hodge
+
+**Status: not implemented** in the current Galerkin branch. The
+sub-tet Whitney 1-form / 2-form basis includes face-diagonal and
+body-diagonal edges/faces that aren't polytope cells, so a polytope-
+edge basis cannot be obtained by simple sum-over-sub-tets (the way
+the 0-form mass matrix is). A proper polytope-edge basis (trilinear
+hex Nedelec, prism / pyramid Nedelec variants) is needed.
+
+This is a research-grade extension and would be its own follow-up
+(several hundred lines, including the various polytope-specific
+Whitney / Nedelec basis functions and their reference-element
+integrals).
+
+For polytope mesh applications today, the over-relaxed
+`nonorthogonal_hodge` is the only choice (it does support hex /
+prism / pyramid `★_2` for the 0-form Laplacian).
