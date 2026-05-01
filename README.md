@@ -35,6 +35,7 @@ those cells in the primal complex:
 - `hexagonal_complex(...)` / `hexagon_complex(...)` for ordered 2D hexagonal cells.
 - `hexahedral_complex(...)` for 3D hexahedron cells.
 - `prismatic_complex(...)` / `prism_complex(...)` for 3D triangular-prism cells.
+- `pyramidal_complex(...)` / `pyramid_complex(...)` for 3D pyramid cells.
 
 For indexed connectivity, pass the point array and cell connectivity:
 
@@ -57,7 +58,7 @@ Non-simplex cells are stored as `Cell`s in the primal complex. Their geometric
 measures are computed from an internal simplex decomposition:
 
 - 2D polygons are fan-triangulated from the first vertex.
-- 3D hexahedra and triangular prisms use fixed tetrahedral decompositions.
+- 3D hexahedra, triangular prisms, and pyramids use fixed tetrahedral decompositions.
 
 Vertices must be ordered along each cell boundary. Polygon cells should be
 simple and non-self-intersecting for the fan triangulation to represent the

@@ -182,6 +182,25 @@ end
 
     prism_mesh = Mesh(prism_tcomp, centroid)
     @test map(length, prism_mesh.dual.complex.cells) == [1, 5, 9, 6]
+
+    pyramid_points = [
+        Point(0, 0, 0),
+        Point(1, 0, 0),
+        Point(1, 1, 0),
+        Point(0, 1, 0),
+        Point(0.5, 0.5, 1),
+    ]
+
+    pyramid_tcomp = pyramidal_complex(pyramid_points)
+    @test map(length, pyramid_tcomp.complex.cells) == [5, 8, 5, 1]
+    @test count(c -> length(c.points) == 3, pyramid_tcomp.complex.cells[3]) == 4
+    @test count(c -> length(c.points) == 4, pyramid_tcomp.complex.cells[3]) == 1
+    @test length(pyramid_tcomp.complex.cells[4][1].points) == 5
+    @test length(pyramid_tcomp.simplices[pyramid_tcomp.complex.cells[4][1]]) == 2
+    @test volume(m, pyramid_tcomp, pyramid_tcomp.complex.cells[4][1]) ≈ 1 / 3
+
+    pyramid_mesh = Mesh(pyramid_tcomp, centroid)
+    @test map(length, pyramid_mesh.dual.complex.cells) == [1, 5, 8, 5]
 end
 
 @testset "shared hexahedron face orientation" begin

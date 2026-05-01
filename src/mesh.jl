@@ -74,7 +74,8 @@ function cell_center(center::Function, c::Cell{N}) where N
 end
 
 export polygonal_complex, quadrilateral_complex, quad_complex, hexagonal_complex,
-    hexagon_complex, polyhedral_complex, hexahedral_complex, prismatic_complex, prism_complex
+    hexagon_complex, polyhedral_complex, hexahedral_complex, prismatic_complex,
+    prism_complex, pyramidal_complex, pyramid_complex
 
 const _HEX_FACES = (
     (1, 4, 3, 2),
@@ -108,11 +109,26 @@ const _PRISM_TETS = (
     (1, 6, 4, 5),
 )
 
+const _PYRAMID_FACES = (
+    (1, 4, 3, 2),
+    (1, 2, 5),
+    (2, 3, 5),
+    (3, 4, 5),
+    (4, 1, 5),
+)
+
+const _PYRAMID_TETS = (
+    (1, 2, 3, 5),
+    (1, 3, 4, 5),
+)
+
 function _polyhedron_faces(kind::Symbol)
     if kind in (:hex, :hexahedron, :hexahedral)
         return _HEX_FACES
     elseif kind in (:prism, :wedge, :triangular_prism)
         return _PRISM_FACES
+    elseif kind in (:pyramid, :pyramidal)
+        return _PYRAMID_FACES
     else
         error("unsupported polyhedron kind: $kind")
     end
@@ -123,6 +139,8 @@ function _polyhedron_tets(kind::Symbol)
         return _HEX_TETS
     elseif kind in (:prism, :wedge, :triangular_prism)
         return _PRISM_TETS
+    elseif kind in (:pyramid, :pyramidal)
+        return _PYRAMID_TETS
     else
         error("unsupported polyhedron kind: $kind")
     end
@@ -133,6 +151,8 @@ function _expected_vertex_count(kind::Symbol)
         return 8
     elseif kind in (:prism, :wedge, :triangular_prism)
         return 6
+    elseif kind in (:pyramid, :pyramidal)
+        return 5
     else
         error("unsupported polyhedron kind: $kind")
     end
@@ -299,9 +319,9 @@ hexagon_complex(args...) = hexagonal_complex(args...)
 """
     polyhedral_complex(elements)
 
-Create a 3D `TriangulatedComplex` from hexahedron and triangular-prism cells while
+Create a 3D `TriangulatedComplex` from hexahedron, triangular-prism, and pyramid cells while
 preserving those cells in the primal complex. Each element is `(kind, points)`, where
-`kind` is `:hex`/`:hexahedron` or `:prism`/`:wedge`.
+`kind` is `:hex`/`:hexahedron`, `:prism`/`:wedge`, or `:pyramid`.
 """
 function polyhedral_complex(
     elements::AbstractVector{<:Tuple{Symbol,<:AbstractVector{Point{N}}}}) where N
@@ -351,6 +371,18 @@ prismatic_complex(points::AbstractVector{Point{N}},
     prismatic_complex([[points[i] for i in prism] for prism in prisms])
 
 prism_complex(args...) = prismatic_complex(args...)
+
+pyramidal_complex(pyramid::AbstractVector{Point{N}}) where N =
+    pyramidal_complex([pyramid])
+
+pyramidal_complex(pyramids::AbstractVector{<:AbstractVector{Point{N}}}) where N =
+    polyhedral_complex([(:pyramid, collect(pyramid)) for pyramid in pyramids])
+
+pyramidal_complex(points::AbstractVector{Point{N}},
+    pyramids::AbstractVector{<:AbstractVector{<:Integer}}) where N =
+    pyramidal_complex([[points[i] for i in pyramid] for pyramid in pyramids])
+
+pyramid_complex(args...) = pyramidal_complex(args...)
 
 """
     elementary_duals!(simplices::Dict{Cell{N}, Vector{Tuple{SimpleBarySimplex{N}, Bool}}},
