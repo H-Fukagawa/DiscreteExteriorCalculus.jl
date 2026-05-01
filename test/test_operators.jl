@@ -8,24 +8,75 @@ using SparseArrays: sparse, spzeros
 const _KUHN_TETS = ((1,2,3,7), (1,3,4,7), (1,4,8,7),
                     (1,8,5,7), (1,5,6,7), (1,6,2,7))
 
-# Build a structured tetrahedral lattice over the parallelepiped spanned by
-# v1, v2, v3 with n×n×n boxes. Returns a `TriangulatedComplex{3, 4}`.
-function _tet_lattice(v1, v2, v3, n)
+# Cube vertex layout used by all polytope-lattice helpers below:
+#   1=(0,0,0), 2=(1,0,0), 3=(1,1,0), 4=(0,1,0),
+#   5=(0,0,1), 6=(1,0,1), 7=(1,1,1), 8=(0,1,1)
+function _cube_corners(pts, i, j, k)
+    return [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+            pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+end
+
+function _lattice_points(v1, v2, v3, n)
     pts = Dict{NTuple{3,Int}, Point{3}}()
     for i in 0:n, j in 0:n, k in 0:n
         c = (i/n) .* v1 .+ (j/n) .* v2 .+ (k/n) .* v3
         pts[(i,j,k)] = Point(c[1], c[2], c[3])
     end
+    return pts
+end
+
+# Tet lattice: each cube → 6 Kuhn tets sharing the (1,7) diagonal.
+function _tet_lattice(v1, v2, v3, n)
+    pts = _lattice_points(v1, v2, v3, n)
     simplices = Simplex{3, 4}[]
     for i in 0:n-1, j in 0:n-1, k in 0:n-1
-        corners = [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
-                   pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+        c8 = _cube_corners(pts, i, j, k)
         for tup in _KUHN_TETS
-            push!(simplices, Simplex(corners[tup[1]], corners[tup[2]],
-                                     corners[tup[3]], corners[tup[4]]))
+            push!(simplices, Simplex(c8[tup[1]], c8[tup[2]], c8[tup[3]], c8[tup[4]]))
         end
     end
     return TriangulatedComplex(simplices)
+end
+
+# Hex lattice: each cube → 1 hexahedral cell.
+function _hex_lattice(v1, v2, v3, n)
+    pts = _lattice_points(v1, v2, v3, n)
+    hexes = Vector{Vector{Point{3}}}()
+    for i in 0:n-1, j in 0:n-1, k in 0:n-1
+        push!(hexes, _cube_corners(pts, i, j, k))
+    end
+    return DEC.hexahedral_complex(hexes)
+end
+
+# Prism lattice: each cube → 2 triangular prisms split along the bottom (1,3) diagonal.
+function _prism_lattice(v1, v2, v3, n)
+    pts = _lattice_points(v1, v2, v3, n)
+    prisms = Vector{Vector{Point{3}}}()
+    for i in 0:n-1, j in 0:n-1, k in 0:n-1
+        c8 = _cube_corners(pts, i, j, k)
+        push!(prisms, [c8[1], c8[2], c8[4], c8[5], c8[6], c8[8]])
+        push!(prisms, [c8[2], c8[3], c8[4], c8[6], c8[7], c8[8]])
+    end
+    return DEC.prismatic_complex(prisms)
+end
+
+# Pyramid lattice: each cube → 6 pyramids whose apex is the cube center.
+function _pyramid_lattice(v1, v2, v3, n)
+    pts = _lattice_points(v1, v2, v3, n)
+    pyramids = Vector{Vector{Point{3}}}()
+    for i in 0:n-1, j in 0:n-1, k in 0:n-1
+        c8 = _cube_corners(pts, i, j, k)
+        cc = (i + 0.5)/n .* v1 .+ (j + 0.5)/n .* v2 .+ (k + 0.5)/n .* v3
+        ctr = Point(cc[1], cc[2], cc[3])
+        # Faces follow _PYRAMID_FACES convention: first 4 are square base, 5th is apex.
+        push!(pyramids, [c8[1], c8[4], c8[3], c8[2], ctr])  # bottom -z
+        push!(pyramids, [c8[5], c8[6], c8[7], c8[8], ctr])  # top +z
+        push!(pyramids, [c8[1], c8[2], c8[6], c8[5], ctr])  # front -y
+        push!(pyramids, [c8[2], c8[3], c8[7], c8[6], ctr])  # right +x
+        push!(pyramids, [c8[3], c8[4], c8[8], c8[7], ctr])  # back +y
+        push!(pyramids, [c8[4], c8[1], c8[5], c8[8], ctr])  # left -x
+    end
+    return DEC.pyramidal_complex(pyramids)
 end
 
 @testset "circumcenter_hodge and exterior_derivative" begin
@@ -369,5 +420,67 @@ end
                         (1, false), (2, false), (3, false), (4, false)]
         @test DEC.corrected_barycentric_hodge(m, mesh, k, primal) ==
             DEC.barycentric_hodge(m, mesh, k, primal)
+    end
+end
+
+@testset "nonorthogonal_hodge: convergence across polytope types" begin
+    # Compare 0-form Laplacian convergence on hex / prism / pyramid / tet
+    # lattices, on the unit cube and on a skewed parallelepiped. Records the
+    # different sensitivities of each cell type to mesh skew.
+    #
+    # Hex and prism are symmetric enough that their cell-LS gradients give
+    # clean h² regardless of skew; tet (Kuhn 6-tet decomposition) loses
+    # that — the Kuhn diagonal-sharing structure is asymmetric and combines
+    # with skew to produce h^≈1.5; pyramid sits between (apex breaks
+    # base-rotational symmetry but each cell has more edges than a tet).
+    function err_polytope(lattice_fn, n, v1, v2, v3)
+        mtr = Metric(3)
+        tcomp = lattice_fn(v1, v2, v3, n)
+        orient!(tcomp.complex)
+        mesh = Mesh(tcomp, centroid)
+        d0 = DEC.exterior_derivative(mesh.primal.complex, 1)
+        d1d = DEC.exterior_derivative(mesh.dual.complex, 3)
+        sNi = DEC.barycentric_hodge(mtr, mesh, 4, false)
+        L = sNi * d1d * DEC.nonorthogonal_hodge(mtr, mesh) * d0
+        verts = mesh.primal.complex.cells[1]
+        u = [sin(π * v.points[1].coords[1]) *
+             sin(π * v.points[1].coords[2]) *
+             sin(π * v.points[1].coords[3]) for v in verts]
+        f_ex = -3 * π^2 .* u
+        _, ext = DEC.boundary_components_connected(mesh.primal.complex)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        return norm((L * u - f_ex)[int_idx]) / sqrt(length(int_idx))
+    end
+
+    function refinement_ratio(lattice_fn, v1, v2, v3)
+        # n=4 → n=8 ratio; for clean h² this is 4.0
+        e4 = err_polytope(lattice_fn, 4, v1, v2, v3)
+        e8 = err_polytope(lattice_fn, 8, v1, v2, v3)
+        return e4 / e8
+    end
+
+    @testset "unit cube — all polytope types ≥ near-h²" begin
+        v_unit = ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0])
+        # All polytope types reach ≥3.5× (≈ h²) on the regular cube grid.
+        @test refinement_ratio(_tet_lattice,     v_unit...) > 3.5
+        @test refinement_ratio(_hex_lattice,     v_unit...) > 3.5
+        @test refinement_ratio(_prism_lattice,   v_unit...) > 3.5
+        @test refinement_ratio(_pyramid_lattice, v_unit...) > 3.5
+    end
+
+    @testset "skewed parallelepiped — hex/prism robust, tet/pyramid degrade" begin
+        v_skew = ([1.0, 0.0, 0.0], [0.2, 1.0, 0.0], [0.1, 0.15, 1.0])
+        # Hex and prism keep clean h² on skewed meshes.
+        @test refinement_ratio(_hex_lattice,   v_skew...) > 3.5
+        @test refinement_ratio(_prism_lattice, v_skew...) > 3.5
+        # Tet (Kuhn) drops to ≈h^1.5 — Kuhn diagonal-sharing asymmetry shows.
+        r_tet = refinement_ratio(_tet_lattice, v_skew...)
+        @test r_tet > 2.0   # well above h¹ (which would be ≈2.0)
+        @test r_tet < 3.5   # not yet h² either; document the gap
+        # Pyramid sits between tet and hex: apex breaks symmetry but more
+        # edges per cell than a tet.
+        r_pyr = refinement_ratio(_pyramid_lattice, v_skew...)
+        @test r_pyr > 2.5
     end
 end
