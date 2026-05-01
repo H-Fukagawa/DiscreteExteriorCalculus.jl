@@ -10,7 +10,88 @@ DiscreteExteriorCalculus.jl is a package implementing [Discrete Exterior Calculu
 
 ## Installation
 
-Clone the repository from GitHub and install Julia 1.1. No build is required beyond the default Julia compilation.
+Clone the repository from GitHub and install Julia 1.12, or another Julia version
+allowed by `Project.toml`. No build is required beyond the default Julia package
+precompilation.
+
+```julia
+using Pkg
+Pkg.activate(".")
+Pkg.instantiate()
+Pkg.test()
+```
+
+## Supported mesh cells
+
+The original simplex-based workflow remains supported for triangles,
+tetrahedra, and higher-dimensional simplices through `Simplex`, `CellComplex`,
+and `TriangulatedComplex`.
+
+The package also provides constructors for non-simplex cells while preserving
+those cells in the primal complex:
+
+- `polygonal_complex(polygons)` for ordered 2D polygon cells.
+- `quadrilateral_complex(...)` / `quad_complex(...)` for ordered 2D quadrilateral cells.
+- `hexagonal_complex(...)` / `hexagon_complex(...)` for ordered 2D hexagonal cells.
+- `hexahedral_complex(...)` for 3D hexahedron cells.
+- `prismatic_complex(...)` / `prism_complex(...)` for 3D triangular-prism cells.
+- `pyramidal_complex(...)` / `pyramid_complex(...)` for 3D pyramid cells.
+
+For indexed connectivity, pass the point array and cell connectivity:
+
+```julia
+points = [
+    Point(0, 0), Point(1, 0), Point(2, 0),
+    Point(0, 1), Point(1, 1), Point(2, 1),
+]
+
+quads = [
+    [1, 2, 5, 4],
+    [2, 3, 6, 5],
+]
+
+tcomp = quadrilateral_complex(points, quads)
+mesh = Mesh(tcomp, centroid)
+```
+
+Non-simplex cells are stored as `Cell`s in the primal complex. Their geometric
+measures are computed from an internal simplex decomposition:
+
+- 2D polygons are fan-triangulated from the first vertex.
+- 3D hexahedra, triangular prisms, and pyramids use fixed tetrahedral decompositions.
+
+Vertices must be ordered along each cell boundary. Polygon cells should be
+simple and non-self-intersecting for the fan triangulation to represent the
+intended area.
+
+## Cell centers
+
+Dual mesh construction takes a center function such as `centroid` or
+`circumcenter(m)`.
+
+For simplex cells, `circumcenter(m)` is the usual metric circumcenter: the point
+whose metric distance to all simplex vertices is equal.
+
+For non-simplex cells, an exact circumcenter may not exist. In that case
+`circumcenter(m)` uses a best-fit circumcenter in the cell's affine hull. If
+`x0` is the first vertex, `v_i = x_i - x0`, `M` is the metric matrix, and `U`
+is a basis for the cell affine hull, the center is written as:
+
+```text
+x0 + U y
+```
+
+where `y` solves the overdetermined linear system:
+
+```text
+2 v_i' M U y = v_i' M v_i
+```
+
+For cyclic or cospherical cells such as rectangles and cubes, this recovers the
+usual circumcenter. For general distorted polygons or polyhedra, it is a
+least-squares center and is not guaranteed to lie inside the cell. Use
+`centroid` when an always-inside average point is more appropriate for the
+application.
 
 ## Example usage: modes of the Laplace-de Rham operator on a rectangle with Dirichlet boundary conditions
 

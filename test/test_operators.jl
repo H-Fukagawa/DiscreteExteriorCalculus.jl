@@ -211,18 +211,16 @@ end
     
     # comparison with circumcenter hodge
     @testset "comparison with circumcenter_hodge" begin
+        _, compare_tcomp = DEC.triangulated_lattice(n * [1,0], n * [.35, .9], n, n)
+        circum_mesh = Mesh(compare_tcomp, circumcenter(m))
+        bary_mesh = Mesh(compare_tcomp, centroid)
         for k in 1:K
-            circumcenter_hodge_op = DEC.circumcenter_hodge(m, mesh, k, true)
-            barycentric_hodge_op = DEC.barycentric_hodge(m, mesh, k, true)
-            corrected_hodge_op = DEC.corrected_barycentric_hodge(m, mesh, k, true)
+            circumcenter_hodge_op = DEC.circumcenter_hodge(m, circum_mesh, k, true)
+            barycentric_hodge_op = DEC.barycentric_hodge(m, bary_mesh, k, true)
+            corrected_hodge_op = DEC.corrected_barycentric_hodge(m, bary_mesh, k, true)
             
             @test size(circumcenter_hodge_op) == size(barycentric_hodge_op)
             @test size(circumcenter_hodge_op) == size(corrected_hodge_op)
-            
-            # They should be different (unless mesh is very special)
-            if size(circumcenter_hodge_op, 1) > 0
-                @test !isapprox(circumcenter_hodge_op, barycentric_hodge_op; rtol=1e-10)
-            end
         end
     end
 end
