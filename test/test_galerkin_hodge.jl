@@ -499,3 +499,54 @@ end
     orient!(tcomp.complex)
     @test_throws ErrorException galerkin_hodge(m, tcomp, 2)
 end
+
+# ============================================================================
+# Non-axis-aligned (sheared) hex via the trilinear isoparametric mapping.
+# Shears each cube in +x by α·y, producing a parallelogram cross-section.
+# The 1-form mass matrix is computed by 2 × 2 × 2 Gauss-Legendre quadrature
+# on the reference cube; for axis-aligned hex this is exact, for general
+# trilinear maps it is O(h⁴) accurate (more than enough for h² overall).
+# ============================================================================
+function _sheared_hex_lattice(n, α=0.3)
+    pts = Dict{NTuple{3,Int}, Point{3}}()
+    for i in 0:n, j in 0:n, k in 0:n
+        x = i/n + α * j/n
+        pts[(i,j,k)] = Point(x, j/n, k/n)
+    end
+    hexes = [[pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+              pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+             for i in 0:n-1, j in 0:n-1, k in 0:n-1]
+    return DEC.hexahedral_complex(vec(hexes))
+end
+
+@testset "galerkin_hodge: non-axis-aligned hex (sheared) — h² Poisson SOLVE" begin
+    m = Metric(3)
+    α = 0.3
+    function err(n)
+        tcomp = _sheared_hex_lattice(n, α)
+        orient!(tcomp.complex)
+        M0, K = galerkin_laplacian(m, tcomp)
+        verts = tcomp.complex.cells[1]
+        # u in parameter space ξ = x − αy, η = y, ζ = z, vanishes on the
+        # parallelogram boundary.
+        u_ex = [let p = v.points[1].coords;
+                    ξ = p[1] - α*p[2]
+                    sin(π*ξ) * sin(π*p[2]) * sin(π*p[3])
+                end for v in verts]
+        # Numerical Δu via central differences (avoids messy chain rule).
+        u_at(p) = (let ξp = p[1] - α*p[2]; sin(π*ξp) * sin(π*p[2]) * sin(π*p[3]); end)
+        h = 1e-4
+        function lapu(p)
+            return (u_at([p[1]+h, p[2], p[3]]) - 2*u_at(p) + u_at([p[1]-h, p[2], p[3]])) / h^2 +
+                   (u_at([p[1], p[2]+h, p[3]]) - 2*u_at(p) + u_at([p[1], p[2]-h, p[3]])) / h^2 +
+                   (u_at([p[1], p[2], p[3]+h]) - 2*u_at(p) + u_at([p[1], p[2], p[3]-h])) / h^2
+        end
+        f = [-lapu(v.points[1].coords) for v in verts]
+        _, ext = DEC.boundary_components_connected(tcomp.complex)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        u_int = K[int_idx, int_idx] \ (M0 * f)[int_idx]
+        return norm(u_int - u_ex[int_idx]) / sqrt(length(int_idx))
+    end
+    @test err(4) / err(8) > 3.5
+end

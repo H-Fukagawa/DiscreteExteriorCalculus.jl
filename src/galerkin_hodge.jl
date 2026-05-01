@@ -472,37 +472,87 @@ const _HEX_X_CORNERS = ((0, 0), (1, 0), (0, 1), (1, 1))  # (y_corner, z_corner)
 const _HEX_Y_CORNERS = ((0, 0), (1, 0), (0, 1), (1, 1))  # (x_corner, z_corner)
 const _HEX_Z_CORNERS = ((0, 0), (1, 0), (1, 1), (0, 1))  # (x_corner, y_corner)
 
-_int_hat(α::Int, β::Int, L::Float64) = (α == β) ? L / 3 : L / 6
+# Trilinear isoparametric Nédélec mass matrix for a general (possibly
+# non-axis-aligned) hex. The reference cube basis is pulled back to physical
+# space via the covariant Piola transformation
+#     φ^p(x) = J^{-T}(ξ) · φ^r(ξ)
+# so the mass entry becomes
+#     M[α,β] = ∫_ref (φ_α^r)ᵀ J^{-1} J^{-T} φ_β^r |det J| dξ dη dζ
+# Evaluated by 2 × 2 × 2 Gauss-Legendre quadrature on the reference cube
+# (exact for axis-aligned hexes, accurate to O(h⁴) for general trilinear maps).
+
+# Reference vertex labelling matching _HEX_FACES / _HEX_REF_VERT_BIT.
+const _HEX_REF_VERT_BIT = ((0,0,0), (1,0,0), (1,1,0), (0,1,0),
+                           (0,0,1), (1,0,1), (1,1,1), (0,1,1))
+
+@inline _ν(α::Int, t::Float64) = α == 0 ? 1 - t : t
+@inline _dν(α::Int) = α == 0 ? -1.0 : 1.0
+
+@inline function _hex_shape_grad(i::Int, ξ::Float64, η::Float64, ζ::Float64)
+    a, b, c = _HEX_REF_VERT_BIT[i]
+    νξ, νη, νζ = _ν(a, ξ), _ν(b, η), _ν(c, ζ)
+    return (_dν(a) * νη * νζ, νξ * _dν(b) * νζ, νξ * νη * _dν(c))
+end
+
+# Reference Nédélec basis function value at (ξ, η, ζ). Returns a 3-tuple
+# (only one component non-zero). α ∈ 1..12 indexes edges in the order:
+# x-edges (1..4), y-edges (5..8), z-edges (9..12), inside each axis using
+# _HEX_X_CORNERS / _HEX_Y_CORNERS / _HEX_Z_CORNERS.
+@inline function _hex_ref_nedelec(α::Int, ξ::Float64, η::Float64, ζ::Float64)
+    if α <= 4
+        y_c, z_c = _HEX_X_CORNERS[α]
+        return (_ν(y_c, η) * _ν(z_c, ζ), 0.0, 0.0)
+    elseif α <= 8
+        x_c, z_c = _HEX_Y_CORNERS[α - 4]
+        return (0.0, _ν(x_c, ξ) * _ν(z_c, ζ), 0.0)
+    else
+        x_c, y_c = _HEX_Z_CORNERS[α - 8]
+        return (0.0, 0.0, _ν(x_c, ξ) * _ν(y_c, η))
+    end
+end
+
+# 2-point Gauss-Legendre on [0, 1].
+const _GAUSS_2PT  = ((1 - 1/sqrt(3)) / 2, (1 + 1/sqrt(3)) / 2)
+const _GAUSS_2PT_W = (0.5, 0.5)
 
 function _hex_local_mass_1form(::Metric{3}, hex_points::Vector{Point{3}})
     @assert length(hex_points) == 8 "hex must have exactly 8 vertices"
-    p1 = hex_points[1].coords
-    p2 = hex_points[2].coords
-    p4 = hex_points[4].coords
-    p5 = hex_points[5].coords
-    Lx = p2[1] - p1[1]
-    Ly = p4[2] - p1[2]
-    Lz = p5[3] - p1[3]
-    @assert Lx > 0 && Ly > 0 && Lz > 0 "hex must be axis-aligned with positive side lengths"
-
     Mloc = zeros(12, 12)
-    # x-edges (rows/cols 1..4)
-    for i in 1:4, j in 1:4
-        y_i, z_i = _HEX_X_CORNERS[i]
-        y_j, z_j = _HEX_X_CORNERS[j]
-        Mloc[i, j] = (1 / Lx) * _int_hat(y_i, y_j, Ly) * _int_hat(z_i, z_j, Lz)
-    end
-    # y-edges (5..8)
-    for i in 1:4, j in 1:4
-        x_i, z_i = _HEX_Y_CORNERS[i]
-        x_j, z_j = _HEX_Y_CORNERS[j]
-        Mloc[4 + i, 4 + j] = (1 / Ly) * _int_hat(x_i, x_j, Lx) * _int_hat(z_i, z_j, Lz)
-    end
-    # z-edges (9..12)
-    for i in 1:4, j in 1:4
-        x_i, y_i = _HEX_Z_CORNERS[i]
-        x_j, y_j = _HEX_Z_CORNERS[j]
-        Mloc[8 + i, 8 + j] = (1 / Lz) * _int_hat(x_i, x_j, Lx) * _int_hat(y_i, y_j, Ly)
+    Jbuf = zeros(3, 3)
+    for iξ in 1:2, iη in 1:2, iζ in 1:2
+        ξ = _GAUSS_2PT[iξ]; η = _GAUSS_2PT[iη]; ζ = _GAUSS_2PT[iζ]
+        w = _GAUSS_2PT_W[iξ] * _GAUSS_2PT_W[iη] * _GAUSS_2PT_W[iζ]
+
+        # Jacobian J at this quadrature point.
+        fill!(Jbuf, 0.0)
+        for i in 1:8
+            dNξ, dNη, dNζ = _hex_shape_grad(i, ξ, η, ζ)
+            pi_coords = hex_points[i].coords
+            for k in 1:3
+                Jbuf[k, 1] += dNξ * pi_coords[k]
+                Jbuf[k, 2] += dNη * pi_coords[k]
+                Jbuf[k, 3] += dNζ * pi_coords[k]
+            end
+        end
+        detJ = Jbuf[1,1]*(Jbuf[2,2]*Jbuf[3,3] - Jbuf[2,3]*Jbuf[3,2]) -
+               Jbuf[1,2]*(Jbuf[2,1]*Jbuf[3,3] - Jbuf[2,3]*Jbuf[3,1]) +
+               Jbuf[1,3]*(Jbuf[2,1]*Jbuf[3,2] - Jbuf[2,2]*Jbuf[3,1])
+        @assert detJ > 1e-14 "hex Jacobian determinant non-positive at quadrature point ($detJ); check vertex ordering or degenerate hex"
+        Jinv = inv(Jbuf)
+        # Mc = J^{-1} J^{-T}, the 3 × 3 SPD metric for the inner product of
+        # reference 1-forms after Piola transformation.
+        Mc = Jinv * transpose(Jinv)
+
+        # Cache the 12 reference basis values at this point.
+        φref = ntuple(α -> _hex_ref_nedelec(α, ξ, η, ζ), 12)
+        wj = w * detJ
+        for α in 1:12, β in 1:12
+            va = φref[α]; vb = φref[β]
+            Mca1 = Mc[1,1]*va[1] + Mc[1,2]*va[2] + Mc[1,3]*va[3]
+            Mca2 = Mc[2,1]*va[1] + Mc[2,2]*va[2] + Mc[2,3]*va[3]
+            Mca3 = Mc[3,1]*va[1] + Mc[3,2]*va[2] + Mc[3,3]*va[3]
+            Mloc[α, β] += wj * (Mca1 * vb[1] + Mca2 * vb[2] + Mca3 * vb[3])
+        end
     end
     edge_pairs = vcat(collect(_HEX_X_EDGES), collect(_HEX_Y_EDGES), collect(_HEX_Z_EDGES))
     return Mloc, edge_pairs
