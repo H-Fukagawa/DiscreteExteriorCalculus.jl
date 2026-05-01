@@ -439,3 +439,63 @@ end
     end
     @test err(4) / err(8) > 3.5
 end
+
+# ============================================================================
+# Prism (wedge Nédélec) Whitney 1-form on right (axis-aligned) prismatic meshes.
+# ============================================================================
+function _prism_lattice_unit(n)
+    pts = Dict{NTuple{3,Int}, Point{3}}()
+    for i in 0:n, j in 0:n, k in 0:n
+        pts[(i,j,k)] = Point(i/n, j/n, k/n)
+    end
+    prisms = Vector{Vector{Point{3}}}()
+    for i in 0:n-1, j in 0:n-1, k in 0:n-1
+        c8 = [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+              pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+        push!(prisms, [c8[1], c8[2], c8[4], c8[5], c8[6], c8[8]])
+        push!(prisms, [c8[2], c8[3], c8[4], c8[6], c8[7], c8[8]])
+    end
+    return DEC.prismatic_complex(prisms)
+end
+
+@testset "galerkin_hodge: prism Nédélec 1-form mass — structural" begin
+    m = Metric(3)
+    tcomp = _prism_lattice_unit(2)
+    orient!(tcomp.complex)
+    M1 = galerkin_hodge(m, tcomp, 2)
+    n_e = length(tcomp.complex.cells[2])
+    @test size(M1) == (n_e, n_e)
+    @test M1 ≈ transpose(M1)
+    @test minimum(eigvals(Symmetric(Matrix(M1)))) > 0
+end
+
+@testset "galerkin_hodge: prism Poisson SOLVE on unit cube reaches h²" begin
+    m = Metric(3)
+    function err(n)
+        tcomp = _prism_lattice_unit(n)
+        orient!(tcomp.complex)
+        M0, K = galerkin_laplacian(m, tcomp)
+        verts = tcomp.complex.cells[1]
+        u_ex = [sin(π*v.points[1].coords[1]) * sin(π*v.points[1].coords[2]) *
+                sin(π*v.points[1].coords[3]) for v in verts]
+        f = 3 * π^2 .* u_ex
+        _, ext = DEC.boundary_components_connected(tcomp.complex)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        u_int = K[int_idx, int_idx] \ (M0 * f)[int_idx]
+        return norm(u_int - u_ex[int_idx]) / sqrt(length(int_idx))
+    end
+    @test err(4) / err(8) > 3.5
+end
+
+# ============================================================================
+# Pyramid: explicit error message (apex-singularity Nédélec is not implemented).
+# ============================================================================
+@testset "galerkin_hodge: pyramid 1-form raises informative error" begin
+    m = Metric(3)
+    pts = [Point(0.0,0.0,0.0), Point(1.0,0.0,0.0), Point(1.0,1.0,0.0), Point(0.0,1.0,0.0),
+           Point(0.5,0.5,0.5)]
+    tcomp = DEC.pyramidal_complex([pts])
+    orient!(tcomp.complex)
+    @test_throws ErrorException galerkin_hodge(m, tcomp, 2)
+end

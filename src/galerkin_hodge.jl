@@ -80,10 +80,10 @@ function galerkin_hodge(m::Metric{N}, tcomp::TriangulatedComplex{N, K},
     if k == 1
         return _assemble_galerkin_polytope_0form(m, tcomp)
     elseif k == 2 && N == 3 && K == 4
-        return _assemble_galerkin_hex_1form(m, tcomp)
+        return _assemble_galerkin_polytope_1form(m, tcomp)
     else
         error("galerkin_hodge with TriangulatedComplex supports k=1 " *
-              "for any polytope mesh, and k=2 for axis-aligned hex meshes only; " *
+              "for any polytope mesh, and k=2 for tet/hex/prism mixes in 3D; " *
               "got k=$k, N=$N, K=$K")
     end
 end
@@ -557,6 +557,136 @@ function _assemble_galerkin_hex_1form(m::Metric{3}, tcomp::TriangulatedComplex{3
         end
 
         for i in 1:12, j in 1:12
+            push!(rows, global_idx[i])
+            push!(cols, global_idx[j])
+            push!(vals, signs[i] * signs[j] * Mloc[i, j])
+        end
+    end
+    return sparse(rows, cols, vals, n_e, n_e)
+end
+
+# ============================================================================
+# Prism (lowest-order Nédélec wedge element) Whitney 1-form mass matrix.
+#
+# A right (axis-aligned) triangular prism has 6 vertices with the codebase
+# convention: 1,2,3 = bottom triangle, 4,5,6 = top triangle directly above
+# 1,2,3 along +z. There are 9 edges:
+#   3 bottom triangle edges (1,2), (1,3), (2,3)
+#   3 top    triangle edges (4,5), (4,6), (5,6)
+#   3 vertical edges        (1,4), (2,5), (3,6)
+#
+# The Nédélec basis is a tensor-product:
+#   - bottom edge e (= 2D Whitney 1-form on triangle):
+#       φ_e = (1 − z/L) · w_e^T(x,y)
+#   - top edge e:
+#       φ_e = (z/L)     · w_e^T(x,y)
+#   - vertical edge at vertex a:
+#       φ_v = (1/L) · λ_a^T(x,y) · ẑ
+#
+# Different-axis groups (horizontal vs vertical) are orthogonal in inner
+# product, so the 9 × 9 mass is block-diagonal with a 6 × 6 horizontal
+# block (further block-2 × 2 in bottom/top) and a 3 × 3 vertical block.
+# All blocks reduce to scaled 2D triangle Whitney / P1 masses.
+#
+# Currently restricted to RIGHT prisms (top = bottom + (0,0,L)). General
+# oblique prisms would need an isoparametric mapping with quadrature.
+
+function _prism_local_mass_1form(::Metric{3}, prism_points::Vector{Point{3}})
+    @assert length(prism_points) == 6 "prism must have exactly 6 vertices"
+    p_bot = prism_points[1:3]
+    p_top = prism_points[4:6]
+    L = p_top[1].coords[3] - p_bot[1].coords[3]
+    @assert L > 0 "prism must extrude in +z direction"
+    for i in 1:3
+        Δz = p_top[i].coords[3] - p_bot[i].coords[3]
+        @assert isapprox(Δz, L; atol=1e-10) "prism extrusion not uniform at vertex $(i + 3)"
+        @assert isapprox(p_top[i].coords[1], p_bot[i].coords[1]; atol=1e-10) &&
+                isapprox(p_top[i].coords[2], p_bot[i].coords[2]; atol=1e-10) (
+            "prism extrusion not parallel to z at vertex $(i + 3)")
+    end
+
+    # 2D triangle (drop z-coordinate) for the Whitney 1-form mass and P1 mass.
+    s_2d = Simplex([Point(p.coords[1], p.coords[2]) for p in p_bot])
+    M_T1, edge_pairs_2d = _local_mass_1form(Metric(2), s_2d)  # 3 × 3
+    M_T0 = _local_mass_0form(Metric(2), s_2d)                  # 3 × 3
+
+    Mloc = zeros(9, 9)
+    Mloc[1:3, 1:3] = (L / 3) * M_T1   # bottom-bottom
+    Mloc[1:3, 4:6] = (L / 6) * M_T1   # bottom-top
+    Mloc[4:6, 1:3] = (L / 6) * M_T1   # top-bottom (symmetric)
+    Mloc[4:6, 4:6] = (L / 3) * M_T1   # top-top
+    Mloc[7:9, 7:9] = (1 / L) * M_T0   # vertical-vertical
+
+    bot_pairs  = [Tuple(p) for p in edge_pairs_2d]                     # (i, j) with i<j in 1..3
+    top_pairs  = [(p[1] + 3, p[2] + 3) for p in edge_pairs_2d]         # 4..6
+    vert_pairs = [(1, 4), (2, 5), (3, 6)]
+    edge_pairs = vcat(bot_pairs, top_pairs, vert_pairs)
+    return Mloc, edge_pairs
+end
+
+# Polytope-aware 1-form mass dispatcher. Replaces the old hex-only
+# `_assemble_galerkin_hex_1form` and handles mixed simplicial / hex / prism
+# meshes (and tets via the existing simplicial Whitney).
+function _polytope_1form_local_mass(m::Metric{3}, top::Cell{3})
+    n_pts = length(top.points)
+    if n_pts == 4
+        # Tet: sub-tet Whitney 1-form (existing simplicial path)
+        s = Simplex(top)
+        return _local_mass_1form(m, s)
+    elseif n_pts == 6
+        return _prism_local_mass_1form(m, top.points)
+    elseif n_pts == 8
+        return _hex_local_mass_1form(m, top.points)
+    elseif n_pts == 5
+        error("Galerkin Hodge k=2 not implemented for pyramid cells. The " *
+              "lowest-order Nédélec basis on a pyramid (Bedrosian or " *
+              "Gradinaru-Hiptmair) requires special apex-singularity " *
+              "handling and is not yet supported. Use a tet-only mesh or " *
+              "the over-relaxed nonorthogonal_hodge instead for pyramid cells.")
+    else
+        error("Galerkin Hodge k=2: unsupported top-dim cell with $n_pts vertices")
+    end
+end
+
+# Generic polytope-mesh 1-form mass assembly. Handles tet / prism / hex
+# uniformly via `_polytope_1form_local_mass`. (Replaces the hex-only
+# `_assemble_galerkin_hex_1form` from the previous commit.)
+function _assemble_galerkin_polytope_1form(m::Metric{3},
+    tcomp::TriangulatedComplex{3, 4})
+    comp = tcomp.complex
+    n_e = length(comp.cells[2])
+
+    edge_lookup = Dict{Set{Point{3}}, Cell{3}}()
+    for e in comp.cells[2]
+        edge_lookup[Set(c.points[1] for c in e.children)] = e
+    end
+    edge_idx = Dict{Cell{3}, Int}()
+    for (i, e) in enumerate(comp.cells[2])
+        edge_idx[e] = i
+    end
+
+    rows, cols, vals = Int[], Int[], Float64[]
+    for top in comp.cells[4]
+        Mloc, edge_pairs = _polytope_1form_local_mass(m, top)
+        n_loc = length(edge_pairs)
+        global_idx = Vector{Int}(undef, n_loc)
+        signs      = Vector{Float64}(undef, n_loc)
+        for (α, (from_l, to_l)) in enumerate(edge_pairs)
+            p_from = top.points[from_l]
+            p_to   = top.points[to_l]
+            e = edge_lookup[Set([p_from, p_to])]
+            global_idx[α] = edge_idx[e]
+            v_pos = nothing; v_neg = nothing
+            for vc in e.children
+                if vc.parents[e]
+                    v_pos = vc.points[1]
+                else
+                    v_neg = vc.points[1]
+                end
+            end
+            signs[α] = (v_neg == p_from && v_pos == p_to) ? 1.0 : -1.0
+        end
+        for i in 1:n_loc, j in 1:n_loc
             push!(rows, global_idx[i])
             push!(cols, global_idx[j])
             push!(vals, signs[i] * signs[j] * Mloc[i, j])
