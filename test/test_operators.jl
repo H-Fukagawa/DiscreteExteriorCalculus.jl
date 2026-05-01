@@ -98,129 +98,121 @@ using SparseArrays: sparse, spzeros
     end
 end
 
-@testset "barycentric_hodge and corrected_barycentric_hodge" begin
-    # setup - same as above
-    begin
-        m = Metric(2)
-        n = 5  # smaller for faster testing
-        _, tcomp = DEC.triangulated_lattice(n * [1,0], n * [.5, .5 * sqrt(3)], n, n)
-        comp = tcomp.complex
-        mesh = Mesh(tcomp, circumcenter(m))
-        N, K = 2, 3
-    end
-    
-    # test barycentric_hodge basic functionality
-    @testset "barycentric_hodge basic tests" begin
-        for k in 1:K+1
-            for primal in [true, false]
-                try
-                    hodge = DEC.barycentric_hodge(m, mesh, k, primal)
-                    @test isa(hodge, AbstractMatrix)
-                    @test size(hodge, 1) == size(hodge, 2)
-                    
-                    # Check sparsity structure
-                    if k <= K
-                        expected_size = primal ? 
-                            length(mesh.dual.complex.cells[K-k+1]) :
-                            length(mesh.primal.complex.cells[K-k+1])
-                        @test size(hodge, 1) == expected_size
-                    end
-                catch e
-                    if k == K+1
-                        @test isa(e, AssertionError) || size(hodge) == (0,0)
-                    else
-                        rethrow(e)
-                    end
-                end
-            end
+@testset "barycentric_hodge structural tests" begin
+    m = Metric(2)
+    n = 5
+    _, tcomp = DEC.triangulated_lattice(n * [1,0], n * [.5, .5 * sqrt(3)], n, n)
+    mesh = Mesh(tcomp, circumcenter(m))
+    K = 3
+
+    for k in 1:K
+        for primal in [true, false]
+            hodge = DEC.barycentric_hodge(m, mesh, k, primal)
+            @test isa(hodge, AbstractMatrix)
+            @test size(hodge, 1) == size(hodge, 2)
+            expected_size = primal ?
+                length(mesh.dual.complex.cells[K-k+1]) :
+                length(mesh.primal.complex.cells[K-k+1])
+            @test size(hodge, 1) == expected_size
         end
     end
-    
-    # test corrected_barycentric_hodge
-    @testset "corrected_barycentric_hodge tests" begin
-        for k in 1:K
-            for primal in [true, false]
-                # Test with default options
-                hodge_corrected = DEC.corrected_barycentric_hodge(m, mesh, k, primal)
-                hodge_basic = DEC.barycentric_hodge(m, mesh, k, primal)
-                
-                @test isa(hodge_corrected, AbstractMatrix)
-                @test size(hodge_corrected) == size(hodge_basic)
-                
-                # Test with selective corrections
-                hodge_dg = DEC.corrected_barycentric_hodge(m, mesh, k, primal; 
-                                                         use_direct_gradient=true, 
-                                                         use_cross_diffusion=false)
-                hodge_cd = DEC.corrected_barycentric_hodge(m, mesh, k, primal; 
-                                                         use_direct_gradient=false, 
-                                                         use_cross_diffusion=true)
-                hodge_none = DEC.corrected_barycentric_hodge(m, mesh, k, primal; 
-                                                           use_direct_gradient=false, 
-                                                           use_cross_diffusion=false)
-                
-                @test isapprox(hodge_none, hodge_basic; rtol=1e-12)
-                @test size(hodge_dg) == size(hodge_basic)
-                @test size(hodge_cd) == size(hodge_basic)
-            end
-        end
+    @test DEC.barycentric_hodge(m, mesh, K+1, true) == spzeros(0, 0)
+end
+
+@testset "nonorthogonal_hodge: equilateral mesh = barycentric_hodge" begin
+    # On equilateral triangulation, centroid coincides with circumcenter, so the
+    # over-relaxed correction must reduce to the diagonal Hodge.
+    m = Metric(2)
+    _, tcomp = DEC.triangulated_lattice([1.0, 0.0], [0.5, 0.5 * sqrt(3)], 6, 6)
+    orient!(tcomp.complex)
+    mesh = Mesh(tcomp, centroid)
+
+    sN = DEC.nonorthogonal_hodge(m, mesh)
+    sD = DEC.barycentric_hodge(m, mesh, 2, true)
+    @test isapprox(sN, sD; atol=1e-12)
+end
+
+@testset "nonorthogonal_hodge: exact flux for linear u on skewed mesh" begin
+    # For linear u, flux through every dual face equals S_e · ∇u exactly.
+    m = Metric(2)
+    _, tcomp = DEC.triangulated_lattice([1.0, 0.0], [0.3, 0.85], 6, 6)
+    orient!(tcomp.complex)
+    mesh = Mesh(tcomp, centroid)
+
+    verts = mesh.primal.complex.cells[1]
+    edges = mesh.primal.complex.cells[2]
+    grad = [2.0, 3.0]
+    u_vec = [grad[1] * v.points[1].coords[1] + grad[2] * v.points[1].coords[2]
+             for v in verts]
+    d0 = DEC.exterior_derivative(mesh.primal.complex, 1)
+    omega = d0 * u_vec
+
+    true_flux = [let de = DEC._primal_edge_vector(e),
+                     S = DEC._dual_face_area_vector(mesh, e, de)
+                     S[1] * grad[1] + S[2] * grad[2]
+                 end for e in edges]
+
+    flux_diag = DEC.barycentric_hodge(m, mesh, 2, true) * omega
+    flux_nono = DEC.nonorthogonal_hodge(m, mesh) * omega
+
+    # Diagonal Hodge has O(skew) error; corrected should be machine precision.
+    @test norm(flux_nono - true_flux) / norm(true_flux) < 1e-12
+    @test norm(flux_diag - true_flux) / norm(true_flux) > 0.05
+end
+
+@testset "nonorthogonal_hodge: Laplacian consistency on skewed mesh" begin
+    # Manufactured solution u = sin(2πx) sin(2πy) on a skewed parallelogram.
+    # Δu = -8π² u, so applying the discrete Laplacian to u_vec should give
+    # f_ex = -8π² u_vec at interior vertices. The diagonal centroidal Hodge is
+    # inconsistent (error stays O(1) under refinement), the over-relaxed
+    # correction restores consistency (error decreases with h).
+    m = Metric(2)
+    function consistency_err(n, hodge_fn)
+        _, tcomp = DEC.triangulated_lattice([1.0, 0.0], [0.3, 0.85], n, n)
+        orient!(tcomp.complex)
+        mesh = Mesh(tcomp, centroid)
+        d0 = DEC.exterior_derivative(mesh.primal.complex, 1)
+        d1d = DEC.exterior_derivative(mesh.dual.complex, 2)
+        sNi = DEC.barycentric_hodge(m, mesh, 3, false)
+        L = sNi * d1d * hodge_fn(mesh) * d0
+
+        verts = mesh.primal.complex.cells[1]
+        u_vec = [sin(2π * v.points[1].coords[1]) * sin(2π * v.points[1].coords[2])
+                 for v in verts]
+        f_ex = -8 * π^2 .* u_vec
+        _, ext = DEC.boundary_components_connected(mesh.primal.complex)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        return norm((L * u_vec - f_ex)[int_idx]) / sqrt(length(int_idx))
     end
-    
-    # test correction functions individually
-    @testset "correction functions" begin
-        k = 2  # test with 1-forms
-        primal = true
-        
-        # Test direct gradient correction
-        dg_correction = DEC.direct_gradient_correction(m, mesh, k, primal)
-        @test isa(dg_correction, AbstractMatrix)
-        
-        # Test cross diffusion correction  
-        cd_correction = DEC.cross_diffusion_correction(m, mesh, k, primal)
-        @test isa(cd_correction, AbstractMatrix)
-        
-        # Check dimensions match
-        base_hodge = DEC.barycentric_hodge(m, mesh, k, primal)
-        @test size(dg_correction) == size(base_hodge)
-        @test size(cd_correction) == size(base_hodge)
-    end
-    
-    # test helper functions
-    @testset "helper functions" begin
-        k = 2
-        primal = true
-        comp = mesh.primal.complex
-        
-        if length(comp.cells[k]) > 1
-            cell1 = comp.cells[k][1]
-            cell2 = comp.cells[k][2]
-            
-            # Test geometric relationship check
-            rel = DEC.has_geometric_relationship(cell1, cell2, k, K)
-            @test isa(rel, Bool)
-            
-            # Test shared boundary measure
-            measure = DEC.compute_shared_boundary_measure(cell1, cell2, k)
-            @test isa(measure, Float64)
-            @test measure >= 0.0
-            
-            # Test neighboring cells
-            neighbors = DEC.get_neighboring_cells(cell1, comp, k)
-            @test isa(neighbors, Vector)
-        end
-    end
-    
-    # comparison with circumcenter hodge
-    @testset "comparison with circumcenter_hodge" begin
-        _, compare_tcomp = DEC.triangulated_lattice(n * [1,0], n * [.35, .9], n, n)
-        circum_mesh = Mesh(compare_tcomp, circumcenter(m))
-        bary_mesh = Mesh(compare_tcomp, centroid)
-        for k in 1:K
-            circumcenter_hodge_op = DEC.circumcenter_hodge(m, circum_mesh, k, true)
-            barycentric_hodge_op = DEC.barycentric_hodge(m, bary_mesh, k, true)
-            corrected_hodge_op = DEC.corrected_barycentric_hodge(m, bary_mesh, k, true)
-            
-            @test size(circumcenter_hodge_op) == size(barycentric_hodge_op)
-            @test size(circumcenter_hodge_op) == size(corrected_hodge_op)
-        end
+
+    diag_hodge(mesh) = DEC.barycentric_hodge(m, mesh, 2, true)
+    nono_hodge(mesh) = DEC.nonorthogonal_hodge(m, mesh)
+
+    err_diag = [consistency_err(n, diag_hodge) for n in [8, 16]]
+    err_nono = [consistency_err(n, nono_hodge) for n in [8, 16]]
+
+    # Diagonal: inconsistent — barely changes under refinement.
+    @test err_diag[2] / err_diag[1] > 0.9
+    # Over-relaxed: at least 3× reduction when h halves (close to 2nd order).
+    @test err_nono[1] / err_nono[2] > 3.0
+    # Over-relaxed beats diagonal at every resolution.
+    @test err_nono[1] < err_diag[1]
+    @test err_nono[2] < err_diag[2]
+end
+
+@testset "corrected_barycentric_hodge dispatch" begin
+    m = Metric(2)
+    _, tcomp = DEC.triangulated_lattice([1.0, 0.0], [0.3, 0.85], 5, 5)
+    orient!(tcomp.complex)
+    mesh = Mesh(tcomp, centroid)
+
+    # Dispatches to nonorthogonal_hodge for 2D primal k=2
+    @test DEC.corrected_barycentric_hodge(m, mesh, 2, true) ==
+        DEC.nonorthogonal_hodge(m, mesh)
+    # Falls back to diagonal barycentric_hodge for other (k, primal)
+    for (k, primal) in [(1, true), (3, true), (1, false), (2, false), (3, false)]
+        @test DEC.corrected_barycentric_hodge(m, mesh, k, primal) ==
+            DEC.barycentric_hodge(m, mesh, k, primal)
     end
 end
