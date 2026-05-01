@@ -39,7 +39,8 @@ where `d_0 = exterior_derivative(comp, 1)`. (The inverse is usually not
 formed explicitly; use `cholesky` and back-solves for production code.)
 """
 function galerkin_hodge(m::Metric{N}, comp::CellComplex{N, K}, k::Int) where {N, K}
-    @assert simplicial(comp) "galerkin_hodge requires a simplicial complex"
+    @assert simplicial(comp) "galerkin_hodge(::CellComplex, ...) requires a " *
+        "simplicial complex; pass a TriangulatedComplex (with k=1) for polytope meshes"
     @assert 1 <= k <= K "k=$k out of range 1:$K"
     if k == 1
         return _assemble_galerkin(m, comp, k, _local_mass_0form)
@@ -53,6 +54,100 @@ function galerkin_hodge(m::Metric{N}, comp::CellComplex{N, K}, k::Int) where {N,
         error("galerkin_hodge not implemented for k=$k in $(N)D (K=$K)")
     end
 end
+
+"""
+    galerkin_hodge(m::Metric{N}, tcomp::TriangulatedComplex{N, K}, k::Int) where {N, K}
+
+Galerkin Hodge for a possibly non-simplicial mesh. The DOFs are the
+polytope-level cells in `tcomp.complex.cells[k]`. Each top-dim primal
+cell (hex, prism, pyramid, or tet) contributes via its stored simplex
+decomposition `tcomp.simplices[c]`.
+
+Currently:
+- `k = 1`: P1 mass matrix on polytope vertices (correct for any
+  polytope decomposition since the basis is linear on each sub-tet
+  and all sub-tet vertices are polytope vertices).
+- `k > 1` on a non-simplicial complex: not implemented — Whitney 1- and
+  2-forms on a polytope edge/face require a polytope-specific
+  basis (e.g. trilinear-hex Nedelec), which differs from the
+  sub-tet Whitney form.
+"""
+function galerkin_hodge(m::Metric{N}, tcomp::TriangulatedComplex{N, K},
+    k::Int) where {N, K}
+    if simplicial(tcomp.complex)
+        return galerkin_hodge(m, tcomp.complex, k)
+    end
+    if k == 1
+        return _assemble_galerkin_polytope_0form(m, tcomp)
+    else
+        error("galerkin_hodge with TriangulatedComplex supports only k=1 " *
+              "for non-simplicial meshes; got k=$k")
+    end
+end
+
+# 0-form mass on polytope mesh: each polytope contributes via its sub-tet
+# decomposition, summing per-tet local mass at polytope vertex indices.
+function _assemble_galerkin_polytope_0form(m::Metric{N},
+    tcomp::TriangulatedComplex{N, K}) where {N, K}
+    comp = tcomp.complex
+    n_v = length(comp.cells[1])
+    point_to_idx = Dict{Point{N}, Int}()
+    for (i, vc) in enumerate(comp.cells[1])
+        point_to_idx[vc.points[1]] = i
+    end
+    rows, cols, vals = Int[], Int[], Float64[]
+    for top in comp.cells[K]
+        for (s_simple, _sign) in tcomp.simplices[top]
+            s = Simplex(s_simple)
+            Mloc = _local_mass_0form(m, s)
+            local_idx = [point_to_idx[p] for p in s.points]
+            for i in 1:K, j in 1:K
+                push!(rows, local_idx[i])
+                push!(cols, local_idx[j])
+                push!(vals, Mloc[i, j])
+            end
+        end
+    end
+    return sparse(rows, cols, vals, n_v, n_v)
+end
+
+export galerkin_stiffness, galerkin_laplacian
+"""
+    galerkin_stiffness(m, comp_or_tcomp) -> SparseMatrixCSC
+
+The stiffness matrix `K = d_0' M_1 d_0` for the Galerkin Poisson
+problem. Symmetric positive semi-definite (zero on constants). For a
+boundary-value problem solve `K · u = M_0 · f` after applying boundary
+conditions; for the eigenproblem solve `K v = λ M_0 v`.
+
+`comp_or_tcomp` may be a `CellComplex` (must be simplicial) or a
+`TriangulatedComplex` (uses sub-tet Whitney forms; currently only for
+simplicial primal complex, since `M_1` is not yet defined on polytope
+edges).
+"""
+galerkin_stiffness(m::Metric, comp::CellComplex) =
+    transpose(exterior_derivative(comp, 1)) * galerkin_hodge(m, comp, 2) *
+    exterior_derivative(comp, 1)
+
+galerkin_stiffness(m::Metric, tcomp::TriangulatedComplex) =
+    galerkin_stiffness(m, tcomp.complex)
+
+"""
+    galerkin_laplacian(m, comp_or_tcomp) -> (M_0, K)
+
+Convenience wrapper returning the mass matrix `M_0` and stiffness matrix
+`K = d_0' M_1 d_0` for the standard 0-form Galerkin (FEM) Laplacian.
+
+Solve `K · u = M_0 · f` for the Poisson problem `-Δu = f`, after
+imposing boundary conditions on the appropriate rows/cols of `K` and
+the corresponding entries of `M_0 f`.
+"""
+function galerkin_laplacian(m::Metric, comp::CellComplex)
+    return (galerkin_hodge(m, comp, 1), galerkin_stiffness(m, comp))
+end
+
+galerkin_laplacian(m::Metric, tcomp::TriangulatedComplex) =
+    galerkin_laplacian(m, tcomp.complex)
 
 # Barycentric-coordinate gradients on a full-dim simplex.
 # Returns a Vector of (K = N+1) gradient SVectors, one per simplex vertex.
