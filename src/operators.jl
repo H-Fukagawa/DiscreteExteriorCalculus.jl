@@ -166,9 +166,17 @@ function nonorthogonal_hodge(m::Metric{N}, mesh::Mesh{N, K}) where {N, K}
     edges = primal_comp.cells[2]
     n_edges = length(edges)
 
-    # Per-vertex gradient reconstruction matrices (matches `sharp`)
+    # Edge → column index, looked up once per incident-edge contribution.
+    edge_idx = Dict{Cell{N}, Int}()
+    sizehint!(edge_idx, n_edges)
+    for (i, e) in enumerate(edges)
+        edge_idx[e] = i
+    end
+
+    # Per-vertex gradient reconstruction matrices (matches `sharp`).
+    # Store edge column indices directly so the assembly loop stays O(1) per entry.
     vertex_grad = Dict{Cell{N}, Matrix{Float64}}()
-    vertex_edges = Dict{Cell{N}, Vector{Cell{N}}}()
+    vertex_edge_cols = Dict{Cell{N}, Vector{Int}}()
     for v in primal_comp.cells[1]
         inc = collect(keys(v.parents))
         if isempty(inc)
@@ -180,7 +188,7 @@ function nonorthogonal_hodge(m::Metric{N}, mesh::Mesh{N, K}) where {N, K}
                 for x in e.children)
         end
         vertex_grad[v] = pinv(mat * m.mat)
-        vertex_edges[v] = inc
+        vertex_edge_cols[v] = [edge_idx[e] for e in inc]
     end
 
     rows, cols, vals = Int[], Int[], Float64[]
@@ -197,10 +205,9 @@ function nonorthogonal_hodge(m::Metric{N}, mesh::Mesh{N, K}) where {N, K}
 
         for v in e.children
             G = vertex_grad[v]
-            inc = vertex_edges[v]
+            cols_v = vertex_edge_cols[v]
             coef = vec(transpose(T_e) * G)
-            for (j, e_j) in enumerate(inc)
-                col = findfirst(isequal(e_j), edges)
+            for (j, col) in enumerate(cols_v)
                 push!(rows, i); push!(cols, col); push!(vals, 0.5 * coef[j])
             end
         end
