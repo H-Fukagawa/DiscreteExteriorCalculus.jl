@@ -255,6 +255,38 @@ centroid(s::Simplex{N, K}) where {N, K} = Barycentric(s, SVector{K, Float64}(one
 centroid(c::Cell{N}) where N =
     SimpleBarycentric(SimpleSimplex(c.points), fill(1.0 / length(c.points), length(c.points)))
 
+export mixed_center
+"""
+    mixed_center(m::Metric{N}; fallback=centroid) where N
+
+Return a center function suitable for `Mesh(tcomp, mixed_center(m))` that
+uses the circumcenter for **well-centered simplex** cells and `fallback`
+(default `centroid`) elsewhere — i.e. for obtuse simplices whose
+circumcenter lies outside the cell, and for any non-simplex cell.
+
+The check is per-cell on the barycentric coordinates of the circumcenter:
+all coordinates `≥ 0` ⇒ circumcenter is inside the simplex ⇒ use it;
+otherwise fall back. Non-simplex cells are dispatched directly to
+`fallback`.
+
+This gives the orthogonal Voronoi dual where geometry permits and a
+robust dual where it doesn't, transparently in mixed meshes:
+
+  - Equivalent to `circumcenter(m)` on a well-centered triangulation.
+  - Equivalent to `centroid` on a Kuhn-tet 3D mesh (every Kuhn tet is
+    obtuse, so every simplex falls back).
+  - Per-cell selection on meshes that mix well-shaped and obtuse
+    simplices, or simplex and polytope cells.
+"""
+mixed_center(m::Metric{N}; fallback=centroid, ϵ::Real=1e-12) where N = x -> begin
+    if x isa Simplex{N}
+        bary, _ = circumsphere_barycentric(m, x)
+        all(c -> c > ϵ, bary.coords) ? bary : fallback(x)
+    else
+        fallback(x)
+    end
+end
+
 """
     barycentric_subspace(m::Metric{N}, s::Simplex{N, K}, f::Simplex{N, J},
         p::Point{N}) where {N, K, J}
