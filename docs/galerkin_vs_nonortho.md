@@ -189,13 +189,46 @@ error than the Kuhn-tet Galerkin solve at matched `n` (1 hex per cube
 vs 6 Kuhn tets per cube), since the Nédélec basis on a hex is
 naturally aligned with the cube faces.
 
-### Prism / pyramid: not yet implemented
+### Prism: implemented (axis-aligned + oblique isoparametric)
 
-A wedge-Nédélec basis (prism) and pyramidal-Nédélec basis (pyramid,
-known to be tricky due to the apex singularity — see Bedrosian or
-Gradinaru-Hiptmair) are next on the list. For mixed polytope meshes
-that combine prism / pyramid with tet, the over-relaxed
-`nonorthogonal_hodge` remains the only choice.
+`galerkin_hodge(m, tcomp, 2)` for a prism mesh uses the lowest-order
+wedge Nédélec element (9 edges = 3 bottom + 3 top + 3 vertical) with
+3-pt sub-triangle × Gauss-Lobatto quadrature on the reference prism.
+Both axis-aligned and general (oblique) prisms achieve clean h²
+Poisson convergence.
+
+### Pyramid: partial — sub-tet stiffness path
+
+The lowest-order pyramidal Nédélec basis (Bedrosian 1992 /
+Gradinaru-Hiptmair 1999) is genuinely research-grade because of the
+apex singularity. We implement the GH/Wachspress shape functions and
+the 8-edge Whitney basis `φ_{ab} = N_a∇N_b − N_b∇N_a`, which satisfies
+the Kronecker δ property `∫_{e_β} φ_α · t̂ ds = δ_{αβ}` (verified
+in `test_galerkin_hodge.jl`). However, this 8-edge basis is NOT
+de-Rham consistent on its own: expanding ∇N_1 in the basis leaves a
+residual equal to the absent base-diagonal Whitney form
+`φ_{13}^raw = N_1∇N_3 − N_3∇N_1`. Closing the de Rham gap requires
+rational diagonal corrections, but those corrections break face
+conformity across base faces shared by neighboring pyramids whose
+local (ξ,η) parametrizations differ.
+
+`galerkin_hodge(m, tcomp, 2)` therefore raises an informative error
+on pyramid meshes. `galerkin_stiffness(m, tcomp)` is special-cased
+to bypass M_1 entirely on pyramid meshes and assemble K directly via
+per-sub-tet `⟨∇λ_i, ∇λ_j⟩` (the standard FEM P1 stiffness on the
+pyramid's 2-tet decomposition). On the cube-center-apex pyramid
+lattice this gives clean h² Poisson convergence:
+
+| n | err   | rate  |
+|---|-------|-------|
+| 4 | 0.077 | -     |
+| 6 | 0.035 | ×2.20 |
+| 8 | 0.020 | ×1.78 |
+
+(Expected ratios for h²: ×2.25 / ×1.78.)
+
+For mixed polytope meshes that combine pyramid with hex / prism / tet,
+the over-relaxed `nonorthogonal_hodge` remains the only `★_2` option.
 
 ### Non-axis-aligned hex: not yet implemented
 

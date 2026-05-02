@@ -489,7 +489,12 @@ end
 end
 
 # ============================================================================
-# Pyramid: explicit error message (apex-singularity Nédélec is not implemented).
+# Pyramid Nédélec via Gradinaru-Hiptmair (1999) Wachspress basis.
+# The 8-edge GH basis satisfies Kronecker (`∫_{e_β} φ_α · t̂ ds = δ_{αβ}`) but
+# is NOT de-Rham consistent on its own (the absent base-diagonal Whitney form
+# leaves a residual in ∇N_a expansions). The 1-form mass dispatcher therefore
+# errors out for pyramid meshes; pyramid Galerkin Poisson is assembled via
+# per-sub-tet ⟨∇λ_i,∇λ_j⟩ instead (see test below).
 # ============================================================================
 @testset "galerkin_hodge: pyramid 1-form raises informative error" begin
     m = Metric(3)
@@ -498,6 +503,32 @@ end
     tcomp = DEC.pyramidal_complex([pts])
     orient!(tcomp.complex)
     @test_throws ErrorException galerkin_hodge(m, tcomp, 2)
+end
+
+@testset "GH pyramid Whitney basis: Kronecker δ on the 8 edges" begin
+    # Reference pyramid (corner-apex, CCW-from-below convention).
+    refv = DEC._REF_PYR_VERTS
+    pyr_points = [Point(refv[i]...) for i in 1:5]
+    # Compute K[α, β] = ∫_{e_β} φ_α · t̂ ds via 5-pt Gauss-Legendre on a unit interval.
+    gl_pts = (0.04691007703067, 0.23076534494716, 0.5,
+              0.76923465505284, 0.95308992296933)
+    gl_w   = (0.11846344252810, 0.23931433524968, 0.28444444444444,
+              0.23931433524968, 0.11846344252810)
+    K = zeros(8, 8)
+    for (β, (a, b)) in enumerate(DEC._PYR_EDGES)
+        p_a = refv[a]; p_b = refv[b]
+        tx = p_b[1] - p_a[1]; ty = p_b[2] - p_a[2]; tz = p_b[3] - p_a[3]
+        for q in 1:5
+            t = gl_pts[q]; w = gl_w[q]
+            ξ = p_a[1] + t*tx; η = p_a[2] + t*ty; ζ = p_a[3] + t*tz
+            for α in 1:8
+                φ = DEC._pyr_whitney(α, ξ, η, ζ)
+                K[α, β] += w * (φ[1]*tx + φ[2]*ty + φ[3]*tz)
+            end
+        end
+    end
+    # The basis should satisfy Kronecker: K ≈ I_8.
+    @test maximum(abs, K - I) < 1e-10
 end
 
 # ============================================================================

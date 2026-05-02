@@ -136,14 +136,15 @@ galerkin_stiffness(m::Metric, comp::CellComplex) =
 # (which dispatches to hex Nédélec for hex meshes, etc.), NOT the simplicial-
 # only CellComplex path. d_0 is structural and works on either complex type.
 #
-# Special case: if the mesh contains pyramid cells (which lack a Nédélec
-# 1-form basis on the 8 polytope edges), assemble the stiffness directly via
-# per-polytope sub-tet integration. This gives the FEM P1 stiffness on the
-# pyramid's simplicial subdivision and provides clean h² Poisson convergence,
-# at the cost of not exposing a separate `galerkin_hodge(_, _, 2)` matrix.
+# Pyramid meshes are special-cased: a true Nédélec (Bedrosian / GH) edge
+# basis on the 8 polytope edges is research-grade (apex singularity + base
+# diagonal cannot be expressed in 8 edge dofs alone — see notes in this file).
+# We therefore assemble pyramid stiffness DIRECTLY via per-sub-tet ⟨∇λ_i,∇λ_j⟩,
+# which is the standard FEM P1 stiffness on the pyramid's 2-tet decomposition
+# and gives clean h² Poisson convergence.
 function galerkin_stiffness(m::Metric, tcomp::TriangulatedComplex)
     if !simplicial(tcomp.complex) &&
-       any(length(top.points) == 5 for top in tcomp.complex.cells[end])
+       any(c -> length(c.points) == 5, tcomp.complex.cells[end])
         return _assemble_polytope_stiffness(m, tcomp)
     end
     d0 = exterior_derivative(tcomp.complex, 1)
@@ -756,6 +757,13 @@ end
 # Polytope-aware 1-form mass dispatcher. Replaces the old hex-only
 # `_assemble_galerkin_hex_1form` and handles mixed simplicial / hex / prism
 # meshes (and tets via the existing simplicial Whitney).
+#
+# Note: pyramid is intentionally NOT dispatched here. The 8-edge GH/Wachspress
+# basis (`_pyramid_local_mass_1form`) is callable directly for research /
+# Kronecker checks but is NOT de-Rham consistent on its own (the absent
+# base-diagonal Whitney form leaves a residual in ∇N_a expansions). Pyramid
+# meshes therefore route `galerkin_stiffness` through `_assemble_polytope_stiffness`
+# (sub-tet ∇λ assembly) — see the `galerkin_stiffness(m, tcomp)` special case.
 function _polytope_1form_local_mass(m::Metric{3}, top::Cell{3})
     n_pts = length(top.points)
     if n_pts == 4
@@ -767,11 +775,11 @@ function _polytope_1form_local_mass(m::Metric{3}, top::Cell{3})
     elseif n_pts == 8
         return _hex_local_mass_1form(m, top.points)
     elseif n_pts == 5
-        error("Galerkin Hodge k=2 not implemented for pyramid cells. The " *
-              "lowest-order Nédélec basis on a pyramid (Bedrosian or " *
-              "Gradinaru-Hiptmair) requires special apex-singularity " *
-              "handling and is not yet supported. Use a tet-only mesh or " *
-              "the over-relaxed nonorthogonal_hodge instead for pyramid cells.")
+        error("Galerkin Hodge k=2 on a pyramid: the lowest-order Nédélec edge " *
+              "basis on a pyramid (8 polytope edges) is not de-Rham consistent " *
+              "without rational diagonal corrections (Bedrosian / GH). Use " *
+              "`galerkin_stiffness(m, tcomp)` directly — it bypasses M_1 on " *
+              "pyramid meshes and assembles K via per-sub-tet ⟨∇λ_i,∇λ_j⟩.")
     else
         error("Galerkin Hodge k=2: unsupported top-dim cell with $n_pts vertices")
     end
@@ -908,4 +916,147 @@ function _assemble_polytope_stiffness(m::Metric{3}, tcomp::TriangulatedComplex{3
         end
     end
     return sparse(rows, cols, vals, n_v, n_v)
+end
+
+# ============================================================================
+# Pyramid lowest-order Nédélec via Gradinaru-Hiptmair (1999) Wachspress
+# rational shape functions + isoparametric Piola pull-back.
+#
+# *** PARTIAL IMPLEMENTATION — research grade ***
+# This basis satisfies the Kronecker property `∫_{e_β} φ_α · t̂ ds = δ_{αβ}`
+# but is NOT de-Rham consistent on its own. Specifically, expanding ∇N_1 in
+# the 8-edge basis `{φ_{ab} : (a,b) ∈ _PYR_EDGES}` leaves a residual equal to
+# the absent base-diagonal Whitney form `φ_{13}^raw = N_1∇N_3 − N_3∇N_1`.
+# Closing the de Rham gap requires rational corrections `δ_{12} = φ_{13}^raw`
+# etc. (see Bedrosian 1992 / GH 1999), but those corrections break face
+# conformity across base faces shared by neighboring pyramids whose local
+# (ξ, η) parametrizations differ — a true conformant fix needs careful basis
+# design beyond the scope of this iteration.
+#
+# Therefore: this mass matrix is exposed only for direct research use
+# (Kronecker checks, basis evaluation). The polytope-stiffness dispatcher
+# `_polytope_1form_local_mass` errors out for pyramids; pyramid Galerkin
+# Poisson goes through `_assemble_polytope_stiffness` (per-sub-tet ⟨∇λ_i,∇λ_j⟩),
+# which is the standard FEM P1 stiffness on the pyramid's 2-tet decomposition
+# and gives clean h² convergence.
+#
+# Reference corner-apex pyramid (matched to the codebase's CCW-from-below
+# pyramid vertex convention so the isoparametric Jacobian is positive on
+# user-built pyramid meshes via `pyramidal_complex`):
+#   v_1 = (0, 0, 0), v_2 = (0, 1, 0), v_3 = (1, 1, 0),
+#   v_4 = (1, 0, 0), v_5 = (0, 0, 1)  [apex]
+# domain {(ξ, η, ζ) : 0 ≤ ξ ≤ 1-ζ, 0 ≤ η ≤ 1-ζ, 0 ≤ ζ ≤ 1}.
+#
+# Wachspress shape functions (rational with apex-singular `1/(1-ζ)` terms
+# but well-defined on the open pyramid):
+#   N_1 = (1-ξ-ζ)(1-η-ζ)/(1-ζ)   — base corner (0,0,0)
+#   N_2 = (1-ξ-ζ)η/(1-ζ)         — base corner (0,1,0)
+#   N_3 = ξη/(1-ζ)               — base corner (1,1,0)
+#   N_4 = ξ(1-η-ζ)/(1-ζ)         — base corner (1,0,0)
+#   N_5 = ζ                       — apex
+# These satisfy Σ N_i = 1 and N_i(v_j) = δ_{ij} (with limit at apex).
+#
+# Edge Whitney basis: φ_{ab} = N_a ∇N_b − N_b ∇N_a (8 polytope edges only;
+# diagonal forms φ_{13}, φ_{24} omitted). Mass entries are computed by 4-pt
+# Gauss quadrature on each of the 2 sub-tets in the pyramid's reference
+# decomposition; the apex is on the sub-tet vertex but never an interior
+# quadrature point. For physical pyramids the basis is pulled back via the
+# same Wachspress map (isoparametric) with covariant Piola transformation.
+
+@inline function _pyr_N(i::Int, ξ::Float64, η::Float64, ζ::Float64)
+    A = 1 - ξ - ζ; B = 1 - η - ζ; C = 1 - ζ
+    if i == 1; return A * B / C
+    elseif i == 2; return A * η / C        # base corner (0,1,0)
+    elseif i == 3; return ξ * η / C        # base corner (1,1,0)
+    elseif i == 4; return ξ * B / C        # base corner (1,0,0)
+    else;          return ζ
+    end
+end
+
+@inline function _pyr_grad_N(i::Int, ξ::Float64, η::Float64, ζ::Float64)
+    A = 1 - ξ - ζ; B = 1 - η - ζ; C = 1 - ζ
+    if i == 1
+        return (-B/C, -A/C, -(A + B)/C + A * B / C^2)
+    elseif i == 2     # N_2 = Aη/C
+        return (-η/C, A/C, η * (A - C) / C^2)
+    elseif i == 3
+        return (η/C, ξ/C, ξ * η / C^2)
+    elseif i == 4     # N_4 = ξB/C
+        return (B/C, -ξ/C, ξ * (B - C) / C^2)
+    else  # i == 5
+        return (0.0, 0.0, 1.0)
+    end
+end
+
+const _PYR_EDGES = ((1,2), (1,4), (2,3), (3,4),  # 4 base edges (i<j canonical)
+                    (1,5), (2,5), (3,5), (4,5))  # 4 lateral edges
+
+@inline function _pyr_whitney(α::Int, ξ::Float64, η::Float64, ζ::Float64)
+    a, b = _PYR_EDGES[α]
+    Na = _pyr_N(a, ξ, η, ζ); Nb = _pyr_N(b, ξ, η, ζ)
+    ga = _pyr_grad_N(a, ξ, η, ζ); gb = _pyr_grad_N(b, ξ, η, ζ)
+    return (Na*gb[1] - Nb*ga[1], Na*gb[2] - Nb*ga[2], Na*gb[3] - Nb*ga[3])
+end
+
+# Reference pyramid sub-tet vertex indices (matches `_PYRAMID_TETS` in mesh.jl).
+const _REF_PYR_SUBTETS = ((1, 2, 3, 5), (1, 3, 4, 5))
+const _REF_PYR_VERTS = ((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (1.0, 1.0, 0.0),
+                       (1.0, 0.0, 0.0), (0.0, 0.0, 1.0))
+
+# 4-point Gauss quadrature on a unit reference tet (volume 1/6); barycentric
+# coordinates of the points and equal weights 1/24.
+const _GAUSS_TET_4PT_BARY = (
+    (0.585410196624969, 0.138196601125011, 0.138196601125011, 0.138196601125011),
+    (0.138196601125011, 0.585410196624969, 0.138196601125011, 0.138196601125011),
+    (0.138196601125011, 0.138196601125011, 0.585410196624969, 0.138196601125011),
+    (0.138196601125011, 0.138196601125011, 0.138196601125011, 0.585410196624969),
+)
+const _GAUSS_TET_4PT_W = (1/24, 1/24, 1/24, 1/24)
+
+function _pyramid_local_mass_1form(::Metric{3}, pyr_points::Vector{Point{3}})
+    @assert length(pyr_points) == 5 "pyramid must have exactly 5 vertices"
+    Mloc = zeros(8, 8)
+    Jbuf = zeros(3, 3)
+
+    for sub in 1:2
+        tv = _REF_PYR_SUBTETS[sub]
+        sub_verts = (_REF_PYR_VERTS[tv[1]], _REF_PYR_VERTS[tv[2]],
+                     _REF_PYR_VERTS[tv[3]], _REF_PYR_VERTS[tv[4]])
+        for q in 1:4
+            bary = _GAUSS_TET_4PT_BARY[q]
+            wq   = _GAUSS_TET_4PT_W[q]
+            ξ = bary[1]*sub_verts[1][1] + bary[2]*sub_verts[2][1] + bary[3]*sub_verts[3][1] + bary[4]*sub_verts[4][1]
+            η = bary[1]*sub_verts[1][2] + bary[2]*sub_verts[2][2] + bary[3]*sub_verts[3][2] + bary[4]*sub_verts[4][2]
+            ζ = bary[1]*sub_verts[1][3] + bary[2]*sub_verts[2][3] + bary[3]*sub_verts[3][3] + bary[4]*sub_verts[4][3]
+
+            # Isoparametric Jacobian J = ∂χ/∂(ξ, η, ζ) via shape-function gradients.
+            fill!(Jbuf, 0.0)
+            for i in 1:5
+                gN = _pyr_grad_N(i, ξ, η, ζ)
+                pi_coords = pyr_points[i].coords
+                for k in 1:3
+                    Jbuf[k, 1] += gN[1] * pi_coords[k]
+                    Jbuf[k, 2] += gN[2] * pi_coords[k]
+                    Jbuf[k, 3] += gN[3] * pi_coords[k]
+                end
+            end
+            detJ = Jbuf[1,1]*(Jbuf[2,2]*Jbuf[3,3] - Jbuf[2,3]*Jbuf[3,2]) -
+                   Jbuf[1,2]*(Jbuf[2,1]*Jbuf[3,3] - Jbuf[2,3]*Jbuf[3,1]) +
+                   Jbuf[1,3]*(Jbuf[2,1]*Jbuf[3,2] - Jbuf[2,2]*Jbuf[3,1])
+            @assert detJ > 1e-14 "pyramid Jacobian non-positive at quadrature point ($detJ); check vertex ordering or degenerate pyramid"
+            Jinv = inv(Jbuf)
+            Mc = Jinv * transpose(Jinv)
+
+            φref = ntuple(α -> _pyr_whitney(α, ξ, η, ζ), 8)
+            wj = wq * detJ
+            for α in 1:8, β in 1:8
+                va = φref[α]; vb = φref[β]
+                Mca1 = Mc[1,1]*va[1] + Mc[1,2]*va[2] + Mc[1,3]*va[3]
+                Mca2 = Mc[2,1]*va[1] + Mc[2,2]*va[2] + Mc[2,3]*va[3]
+                Mca3 = Mc[3,1]*va[1] + Mc[3,2]*va[2] + Mc[3,3]*va[3]
+                Mloc[α, β] += wj * (Mca1 * vb[1] + Mca2 * vb[2] + Mca3 * vb[3])
+            end
+        end
+    end
+    return Mloc, collect(_PYR_EDGES)
 end
