@@ -709,6 +709,22 @@ end
 # edges (SPD). Pyramid Galerkin Poisson is assembled via per-sub-tet
 # ⟨∇λ_i,∇λ_j⟩ for correct K_FEM (see test below).
 # ============================================================================
+@testset "galerkin_hodge k=3: pyramid RT_0 returns SPD 5×5 M_2 (both orientations)" begin
+    m = Metric(3)
+    for (label, pts) in (
+        ("CCW-from-below", [Point(0.0,0.0,0.0), Point(0.0,1.0,0.0), Point(1.0,1.0,0.0),
+                            Point(1.0,0.0,0.0), Point(0.5,0.5,0.5)]),
+        ("CCW-from-above", [Point(0.0,0.0,0.0), Point(1.0,0.0,0.0), Point(1.0,1.0,0.0),
+                            Point(0.0,1.0,0.0), Point(0.5,0.5,0.5)]))
+        tcomp = DEC.polyhedral_complex([(:pyramid, pts)])
+        orient!(tcomp.complex)
+        M2 = galerkin_hodge(m, tcomp, 3)
+        @test size(M2) == (5, 5)
+        @test maximum(abs, M2 - M2') < 1e-12
+        @test minimum(eigvals(Symmetric(Matrix(M2)))) > 0
+    end
+end
+
 @testset "galerkin_hodge: pyramid 1-form returns SPD 8×8 M_eff (both orientations)" begin
     m = Metric(3)
     for (label, pts) in (

@@ -311,15 +311,21 @@ all four polytope types. Three different constructions:
     ψ_F_3 = (ξ, η-1, 0),        ψ_F_4 = (ξ, η, 0),    ψ_F_5 = (ξ-1, η, 0)
   with isoparametric contravariant Piola; mass via 3-pt triangle Gauss
   × 2-pt z-Gauss = 6 quad points. 5 face DOFs.
-- **Pyramid** — sub-tet decomposition with **area-weighted projection**:
-  each polytope quad face = 2 sub-tet triangle faces, and the
-  polytope-face Whitney 2-form has uniform flux 1 across the polytope
-  face. The projection matrix `T[σ, F] = ±A_σ / A_F` (sign flip if the
-  sub-tet face normal points opposite to the polytope face normal), and
-  `M_polytope = T^T M_subtet T` summed over sub-tets. Internal sub-tet
-  faces (those not lying on a polytope face) get no bubble DOFs in this
-  construction (set to 0 in T) — a pragmatic choice sufficient for SPD
-  `★_2`. 5 face DOFs.
+- **Pyramid** — direct lowest-order Hdiv basis on the corner-apex
+  reference pyramid, analogous to the prism wedge but with apex-singular
+  rational terms in the lateral basis functions:
+    ψ_F_1 (base, n̂=+ẑ from cyclic):       (-ξ, -η, 1-ζ)        polynomial
+    ψ_F_2 (lateral 1-2-5, n̂=+x̂):           (2 - 2ξ/(1-ζ), 0, 0)
+    ψ_F_3 (lateral 2-3-5, n̂=(0,-1,-1)/√2): (0, -2η/(1-ζ), 0)
+    ψ_F_4 (lateral 3-4-5, n̂=(-1,0,-1)/√2): (-2ξ/(1-ζ), 0, 0)
+    ψ_F_5 (lateral 4-1-5, n̂=+ŷ):           (0, 2 - 2η/(1-ζ), 0)
+  Kronecker δ analytically verified. The 1/(1-ζ) singularity is bounded
+  inside the pyramid (since ξ, η ≤ 1-ζ), and absorbed by the Duffy
+  substitution `ξ = (1-ζ)ξ'`, `η = (1-ζ)η'` with the (1-ζ)² Jacobian
+  during 4×4×4 Gauss-Legendre quadrature. The implementation is robust
+  to both base orientations via the same v_2↔v_4 swap as the 1-form
+  mass; the corresponding face permutation is applied to the output.
+  5 face DOFs.
 
 Sign convention for global assembly is uniform across all polytope
 types: triangle faces use permutation parity vs the global face cell's
@@ -341,18 +347,21 @@ saddle-point mixed-FEM block matrix for the Hodge Laplacian on `k-1`
 forms. Convergence on the unit cube with
 `ω_ex = sin(πx)sin(πy)sin(πz) (dx + dy + dz)`:
 
-| Mesh                  | n=4    | n=8    | rate       |
-|-----------------------|--------|--------|------------|
-| Hex (RT_0)            | 0.015  | 0.002  | ≈ h^{2.5}  |
-| **Prism (true RT_0)** | 0.022  | 0.003  | ≈ h^{2.5}  |
-| Pyramid (sub-tet)     | 0.016  | 0.006  | ≈ h^{1.3}  |
+| Mesh                    | n=4    | n=8    | rate       |
+|-------------------------|--------|--------|------------|
+| Hex (RT_0)              | 0.015  | 0.002  | ≈ h^{2.5}  |
+| Prism (true RT_0)       | 0.022  | 0.003  | ≈ h^{2.5}  |
+| Pyramid (true Hdiv RT_0) | 0.015  | 0.007  | ≈ h^{1.3}  |
 
-Hex AND prism achieve super-convergence — both use direct lowest-order
-RT_0/Nédélec face bases via isoparametric contravariant Piola. Pyramid
-inherits slower convergence from its sub-tet-projection M_2 and
-Schur-condensed M_1; SPD and solvable, but requires either bubble
-DOFs as global edges or a true pyramid RT_0 basis (apex singularity)
-for higher rates.
+Hex and prism achieve super-convergence via direct lowest-order
+RT_0/Nédélec face bases. Pyramid M_2 is also implemented as a true
+Hdiv basis with apex-singular rational terms (Kronecker δ verified;
+SPD), but the Hodge Laplacian convergence rate on pyramid meshes is
+unchanged from the sub-tet-projection alternative — the bottleneck is
+the **Schur-condensed M_1** (Bedrosian Type-II construction), not the
+M_2. Improving pyramid Hodge Laplacian convergence to h² would require
+keeping the M_1 base-diagonal bubble DOFs as INDEPENDENT global edges
+(architectural change to d_0 / M_1 assembly) — future work.
 
 #### Why bubble DOFs (Schur) don't fix prism/pyramid M_2 convergence
 

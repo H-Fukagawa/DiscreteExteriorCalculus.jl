@@ -1028,7 +1028,8 @@ function _polytope_2form_local_mass(m::Metric{3}, top::Cell{3},
         Mloc, faces = _prism_local_mass_2form(m, top.points)
         return Mloc, [collect(f) for f in faces]
     elseif n_pts == 5
-        return _polytope_2form_via_subtets(m, top, sub_tets, _PYRAMID_FACES)
+        Mloc, faces = _pyramid_local_mass_2form(m, top.points)
+        return Mloc, [collect(f) for f in faces]
     else
         error("Galerkin Hodge k=3: unsupported top-dim cell with $n_pts vertices")
     end
@@ -1395,6 +1396,115 @@ const _GAUSS_LEG_4PT_W = (
     0.652145154862546 / 2,
     0.347854845137454 / 2,
 )
+
+# Reference pyramid Whitney 2-form (Hdiv) basis, corner-apex convention with
+# v_1 = (0,0,0), v_2 = (0,1,0), v_3 = (1,1,0), v_4 = (1,0,0), v_5 = (0,0,1).
+# Face order matches `_PYRAMID_FACES = ((1,4,3,2), (1,2,5), (2,3,5), (3,4,5), (4,1,5))`.
+# Face normals from cyclic right-hand rule:
+#   n̂_F_1 = +ẑ        (base; "outward of pyramid" is -ẑ but cyclic order gives +ẑ)
+#   n̂_F_2 = +x̂        (lateral 1-2-5)
+#   n̂_F_3 = (0,-1,-1)/√2  (lateral 2-3-5)
+#   n̂_F_4 = (-1,0,-1)/√2  (lateral 3-4-5)
+#   n̂_F_5 = +ŷ        (lateral 4-1-5)
+# Kronecker δ analytically verified: ∫_{F_β} ψ_α · n̂_β dA = δ_{αβ}.
+# Lateral basis functions have a 1/(1-ζ) apex singularity but are bounded
+# throughout the pyramid (since ξ/(1-ζ) ≤ 1 inside the corner-apex pyramid).
+@inline function _pyr_ref_rt0(α::Int, ξ::Float64, η::Float64, ζ::Float64)
+    if α == 1                               # base, n̂=+ẑ
+        return (-ξ, -η, 1 - ζ)
+    elseif α == 2                           # lateral 1-2-5, n̂=+x̂
+        return (2 - 2 * ξ / (1 - ζ), 0.0, 0.0)
+    elseif α == 3                           # lateral 2-3-5, n̂=(0,-1,-1)/√2
+        return (0.0, -2 * η / (1 - ζ), 0.0)
+    elseif α == 4                           # lateral 3-4-5, n̂=(-1,0,-1)/√2
+        return (-2 * ξ / (1 - ζ), 0.0, 0.0)
+    else                                    # α == 5, lateral 4-1-5, n̂=+ŷ
+        return (0.0, 2 - 2 * η / (1 - ζ), 0.0)
+    end
+end
+
+# Pyramid Hdiv face mass via Duffy-substituted 4×4×4 Gauss-Legendre
+# quadrature, with isoparametric contravariant Piola pull-back. Same
+# substitution `ξ = (1-ζ) ξ'`, `η = (1-ζ) η'` as the 1-form mass; the
+# (1-ζ)² substitution Jacobian absorbs the apex singularity in the basis.
+function _pyramid_local_mass_2form(::Metric{3}, pyr_points::Vector{Point{3}})
+    @assert length(pyr_points) == 5 "pyramid must have exactly 5 vertices"
+    # Same vertex canonicalization as the 1-form mass: swap local v_2 ↔ v_4
+    # if the input pyramid has CCW-from-above base ordering. The face
+    # permutation is then applied to the output mass matrix (see end).
+    v1 = pyr_points[1].coords; v2 = pyr_points[2].coords
+    v3 = pyr_points[3].coords; v4 = pyr_points[4].coords; v5 = pyr_points[5].coords
+    n_base = ((v2[2]-v1[2])*(v4[3]-v1[3]) - (v2[3]-v1[3])*(v4[2]-v1[2]),
+              (v2[3]-v1[3])*(v4[1]-v1[1]) - (v2[1]-v1[1])*(v4[3]-v1[3]),
+              (v2[1]-v1[1])*(v4[2]-v1[2]) - (v2[2]-v1[2])*(v4[1]-v1[1]))
+    apex_dir = (v5[1] - v1[1], v5[2] - v1[2], v5[3] - v1[3])
+    handedness = n_base[1]*apex_dir[1] + n_base[2]*apex_dir[2] + n_base[3]*apex_dir[3]
+    swapped = handedness > 0
+    pts = swapped ?
+        [pyr_points[1], pyr_points[4], pyr_points[3], pyr_points[2], pyr_points[5]] :
+        pyr_points
+
+    Mloc = zeros(5, 5)
+    Jbuf = zeros(3, 3)
+    for qζ in 1:4
+        ζ = _GAUSS_LEG_4PT[qζ]; w_ζ = _GAUSS_LEG_4PT_W[qζ]
+        one_minus_ζ = 1 - ζ
+        substitution_jac = one_minus_ζ * one_minus_ζ
+        for qξ in 1:4
+            ξ_p = _GAUSS_LEG_4PT[qξ]; w_ξ = _GAUSS_LEG_4PT_W[qξ]
+            ξ = one_minus_ζ * ξ_p
+            for qη in 1:4
+                η_p = _GAUSS_LEG_4PT[qη]; w_η = _GAUSS_LEG_4PT_W[qη]
+                η = one_minus_ζ * η_p
+
+                fill!(Jbuf, 0.0)
+                for i in 1:5
+                    gN = _pyr_grad_N(i, ξ, η, ζ)
+                    pi_coords = pts[i].coords
+                    for k in 1:3
+                        Jbuf[k, 1] += gN[1] * pi_coords[k]
+                        Jbuf[k, 2] += gN[2] * pi_coords[k]
+                        Jbuf[k, 3] += gN[3] * pi_coords[k]
+                    end
+                end
+                detJ = Jbuf[1,1]*(Jbuf[2,2]*Jbuf[3,3] - Jbuf[2,3]*Jbuf[3,2]) -
+                       Jbuf[1,2]*(Jbuf[2,1]*Jbuf[3,3] - Jbuf[2,3]*Jbuf[3,1]) +
+                       Jbuf[1,3]*(Jbuf[2,1]*Jbuf[3,2] - Jbuf[2,2]*Jbuf[3,1])
+                @assert detJ > 1e-14 "pyramid Jacobian non-positive ($detJ)"
+                # For face elements: Mc = J^T J, divide by det J in integrand.
+                Mc = transpose(Jbuf) * Jbuf
+
+                ψref = ntuple(α -> _pyr_ref_rt0(α, ξ, η, ζ), 5)
+                wj = w_ζ * w_ξ * w_η * substitution_jac / detJ
+                for α in 1:5, β in 1:5
+                    va = ψref[α]; vb = ψref[β]
+                    Mca1 = Mc[1,1]*va[1] + Mc[1,2]*va[2] + Mc[1,3]*va[3]
+                    Mca2 = Mc[2,1]*va[1] + Mc[2,2]*va[2] + Mc[2,3]*va[3]
+                    Mca3 = Mc[3,1]*va[1] + Mc[3,2]*va[2] + Mc[3,3]*va[3]
+                    Mloc[α, β] += wj * (Mca1 * vb[1] + Mca2 * vb[2] + Mca3 * vb[3])
+                end
+            end
+        end
+    end
+    if swapped
+        # If we swapped local v_2 ↔ v_4, the 5 face DOFs get permuted:
+        # base (face 1) is unchanged (still the same set of 4 base vertices,
+        # just traversed in opposite cyclic order — but the cyclic class is
+        # the same, so face 1 stays at row/col 1). Lateral faces:
+        #   F_2 = (1,2,5)_input → with swap (1,4,5)_internal = F_5 of internal frame
+        #   F_3 = (2,3,5)_input → (4,3,5)_internal = F_4
+        #   F_4 = (3,4,5)_input → (3,2,5)_internal = F_3
+        #   F_5 = (4,1,5)_input → (2,1,5)_internal = F_2
+        # So permutation (input → internal): [1, 5, 4, 3, 2]
+        P = (1, 5, 4, 3, 2)
+        Mout = zeros(5, 5)
+        @inbounds for α in 1:5, β in 1:5
+            Mout[α, β] = Mloc[P[α], P[β]]
+        end
+        return Mout, collect(_PYRAMID_FACES)
+    end
+    return Mloc, collect(_PYRAMID_FACES)
+end
 
 # Build the full 10×10 Bedrosian Type-II mass matrix (8 polytope edges +
 # 2 base-diagonal bubbles) on a physical pyramid via 4-pt Gauss quadrature
