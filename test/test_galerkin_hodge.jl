@@ -425,11 +425,10 @@ end
 end
 
 @testset "galerkin_hodge_laplacian_block: prism + pyramid 1-form Hodge Laplacian" begin
-    # Prism + pyramid M_2 are built via sub-tet projection (no bubble DOFs),
-    # which gives an SPD Hodge mass but a non-Whitney 1-form FE space; the
-    # mixed-FEM Hodge Laplacian still solves cleanly but with reduced
-    # convergence rate (≈ h^{1.5} on these meshes). The test asserts
-    # stability: the system solves without singularity and the error decreases.
+    # Prism uses true wedge RT_0 face basis with isoparametric Piola — gives
+    # ≈ h^{2.5} super-convergence (observed ratio ≈9 between n=4 and n=8,
+    # matching the hex result). Pyramid uses sub-tet projection for M_2 (no
+    # true RT_0 yet) and Schur-condensed M_1 — convergence ≈ h^{1.3}.
     function prism_lat(n)
         pts = Dict{Tuple{Int,Int,Int}, Point{3}}()
         for i in 0:n, j in 0:n, k in 0:n; pts[(i,j,k)] = Point(i/n, j/n, k/n); end
@@ -444,7 +443,7 @@ end
     end
     e4_p = _hodge_lap_err(prism_lat(4))
     e8_p = _hodge_lap_err(prism_lat(8))
-    @test e4_p / e8_p > 1.5    # at least monotone decrease (observed ≈1.7)
+    @test e4_p / e8_p > 5.0    # ≈ h^{2.5}: ratio ≈ (8/4)^{2.5} = 5.66 (observed ≈9)
 
     # Pyramid lattice
     function pyr_lat(n)

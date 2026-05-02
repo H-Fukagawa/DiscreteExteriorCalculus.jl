@@ -305,15 +305,21 @@ all four polytope types. Three different constructions:
   `ψ^p = J ψ^r / det J`. 6 face DOFs; mass evaluated by 2 × 2 × 2
   Gauss-Legendre quadrature. On the unit cube the local mass is
   block-diagonal in three axis groups, each block `[[1/3, -1/6], [-1/6, 1/3]]`.
-- **Prism / pyramid** — sub-tet decomposition with **area-weighted
-  projection**: each polytope quad face = 2 sub-tet triangle faces, and
-  the polytope-face Whitney 2-form has uniform flux 1 across the
-  polytope face. The projection matrix `T[σ, F] = ±A_σ / A_F` (sign
-  flip if the sub-tet face normal points opposite to the polytope face
-  normal), and `M_polytope = T^T M_subtet T` summed over sub-tets.
-  Internal sub-tet faces (those not lying on a polytope face) get no
-  bubble DOFs in this construction (set to 0 in T) — a pragmatic choice
-  sufficient for SPD `★_2` inner products. 5 face DOFs each.
+- **Prism** — true wedge RT_0 face basis on the reference prism (bottom
+  triangle (0,0)-(1,0)-(0,1) × axial [0,1]):
+    ψ_bot = (0, 0, -2(1-ζ)),    ψ_top = (0, 0, 2ζ)
+    ψ_F_3 = (ξ, η-1, 0),        ψ_F_4 = (ξ, η, 0),    ψ_F_5 = (ξ-1, η, 0)
+  with isoparametric contravariant Piola; mass via 3-pt triangle Gauss
+  × 2-pt z-Gauss = 6 quad points. 5 face DOFs.
+- **Pyramid** — sub-tet decomposition with **area-weighted projection**:
+  each polytope quad face = 2 sub-tet triangle faces, and the
+  polytope-face Whitney 2-form has uniform flux 1 across the polytope
+  face. The projection matrix `T[σ, F] = ±A_σ / A_F` (sign flip if the
+  sub-tet face normal points opposite to the polytope face normal), and
+  `M_polytope = T^T M_subtet T` summed over sub-tets. Internal sub-tet
+  faces (those not lying on a polytope face) get no bubble DOFs in this
+  construction (set to 0 in T) — a pragmatic choice sufficient for SPD
+  `★_2`. 5 face DOFs.
 
 Sign convention for global assembly is uniform across all polytope
 types: triangle faces use permutation parity vs the global face cell's
@@ -335,18 +341,18 @@ saddle-point mixed-FEM block matrix for the Hodge Laplacian on `k-1`
 forms. Convergence on the unit cube with
 `ω_ex = sin(πx)sin(πy)sin(πz) (dx + dy + dz)`:
 
-| Mesh             | n=4    | n=8    | rate          |
-|------------------|--------|--------|---------------|
-| Hex (RT_0)       | 0.015  | 0.002  | ≈ h^{2.5}     |
-| Prism (sub-tet)  | 0.019  | 0.011  | ≈ h^{0.5–1}   |
-| Pyramid (sub-tet) | 0.016  | 0.006  | ≈ h^{1.3}     |
+| Mesh                  | n=4    | n=8    | rate       |
+|-----------------------|--------|--------|------------|
+| Hex (RT_0)            | 0.015  | 0.002  | ≈ h^{2.5}  |
+| **Prism (true RT_0)** | 0.022  | 0.003  | ≈ h^{2.5}  |
+| Pyramid (sub-tet)     | 0.016  | 0.006  | ≈ h^{1.3}  |
 
-Hex achieves super-convergence (matching the ≈h^{2.5} measured for
-3D Kuhn tet). Prism / pyramid inherit slower convergence from their
-simplified `M_2` construction (sub-tet projection without bubble DOFs)
-and (for pyramid) the Schur-condensed `M_1`. Both still give SPD,
-solvable systems with stable error decrease — sufficient for ★d★d
-operator pipelines on mixed polytope meshes.
+Hex AND prism achieve super-convergence — both use direct lowest-order
+RT_0/Nédélec face bases via isoparametric contravariant Piola. Pyramid
+inherits slower convergence from its sub-tet-projection M_2 and
+Schur-condensed M_1; SPD and solvable, but requires either bubble
+DOFs as global edges or a true pyramid RT_0 basis (apex singularity)
+for higher rates.
 
 #### Why bubble DOFs (Schur) don't fix prism/pyramid M_2 convergence
 

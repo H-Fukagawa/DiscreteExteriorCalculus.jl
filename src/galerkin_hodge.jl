@@ -803,6 +803,78 @@ end
 const _GAUSS_TRI_3PT   = ((1/6, 1/6), (4/6, 1/6), (1/6, 4/6))
 const _GAUSS_TRI_3PT_W = (1/6, 1/6, 1/6)
 
+# Reference prism Whitney 2-form (RT_0) basis. Reference prism has bottom
+# triangle vertices at (ξ,η) = (0,0), (1,0), (0,1) and top triangle at ζ=1.
+# A_T = 1/2, V = 1/2.
+#   ψ_1 (bot, n=-ẑ):  (0, 0, -2(1-ζ))
+#   ψ_2 (top, n=+ẑ):  (0, 0, 2ζ)
+#   ψ_3 (side opposite v_3 at η=0):    (ξ,     η - 1, 0)
+#   ψ_4 (side opposite v_1 at ξ+η=1):  (ξ,     η,     0)
+#   ψ_5 (side opposite v_2 at ξ=0):    (ξ - 1, η,     0)
+# Order matches `_PRISM_FACES = ((1,3,2), (4,5,6), (1,2,5,4), (2,3,6,5), (3,1,4,6))`.
+# Kronecker δ verified: ∫_{F_β} ψ_α · n̂_β dA = δ_{αβ} on the reference prism.
+@inline function _ref_prism_rt0(α::Int, ξ::Float64, η::Float64, ζ::Float64)
+    if α == 1                                    # bot
+        return (0.0, 0.0, -2 * (1 - ζ))
+    elseif α == 2                                # top
+        return (0.0, 0.0, 2 * ζ)
+    elseif α == 3                                # side opposite v_3
+        return (ξ,       η - 1, 0.0)
+    elseif α == 4                                # side opposite v_1
+        return (ξ,       η,     0.0)
+    else                                         # α == 5, side opposite v_2
+        return (ξ - 1,   η,     0.0)
+    end
+end
+
+# Prism RT_0 face mass via 3-point triangle Gauss × 2-point z-Gauss-Legendre
+# (= 6 quad points on reference prism, exact for the polynomial integrand on
+# right axis-aligned prisms, O(h⁴) for general isoparametric prisms).
+# Contravariant Piola pull-back: ψ^p = J ψ^r / det J;
+#   M[α,β] = ∫_ref ψ_α^r^T (J^T J) ψ_β^r / det J  dV_ref.
+function _prism_local_mass_2form(::Metric{3}, prism_points::Vector{Point{3}})
+    @assert length(prism_points) == 6 "prism must have exactly 6 vertices"
+    Mloc = zeros(5, 5)
+    Jbuf = zeros(3, 3)
+    for tri in 1:3
+        ξ_t, η_t = _GAUSS_TRI_3PT[tri]
+        w_tri = _GAUSS_TRI_3PT_W[tri]
+        for zi in 1:2
+            ζ = _GAUSS_2PT[zi]
+            w_z = _GAUSS_2PT_W[zi]
+            w = w_tri * w_z
+
+            fill!(Jbuf, 0.0)
+            for i in 1:6
+                dξ, dη, dζ = _prism_shape_grad(i, ξ_t, η_t, ζ)
+                pi_coords = prism_points[i].coords
+                for k in 1:3
+                    Jbuf[k, 1] += dξ * pi_coords[k]
+                    Jbuf[k, 2] += dη * pi_coords[k]
+                    Jbuf[k, 3] += dζ * pi_coords[k]
+                end
+            end
+            detJ = Jbuf[1,1]*(Jbuf[2,2]*Jbuf[3,3] - Jbuf[2,3]*Jbuf[3,2]) -
+                   Jbuf[1,2]*(Jbuf[2,1]*Jbuf[3,3] - Jbuf[2,3]*Jbuf[3,1]) +
+                   Jbuf[1,3]*(Jbuf[2,1]*Jbuf[3,2] - Jbuf[2,2]*Jbuf[3,1])
+            @assert detJ > 1e-14 "prism Jacobian non-positive ($detJ); check vertex ordering"
+            # For face elements: Mc = J^T J, divide by det J in the integrand.
+            Mc = transpose(Jbuf) * Jbuf
+
+            ψref = ntuple(α -> _ref_prism_rt0(α, ξ_t, η_t, ζ), 5)
+            wj = w / detJ
+            for α in 1:5, β in 1:5
+                va = ψref[α]; vb = ψref[β]
+                Mca1 = Mc[1,1]*va[1] + Mc[1,2]*va[2] + Mc[1,3]*va[3]
+                Mca2 = Mc[2,1]*va[1] + Mc[2,2]*va[2] + Mc[2,3]*va[3]
+                Mca3 = Mc[3,1]*va[1] + Mc[3,2]*va[2] + Mc[3,3]*va[3]
+                Mloc[α, β] += wj * (Mca1 * vb[1] + Mca2 * vb[2] + Mca3 * vb[3])
+            end
+        end
+    end
+    return Mloc, collect(_PRISM_FACES)
+end
+
 function _prism_local_mass_1form(::Metric{3}, prism_points::Vector{Point{3}})
     @assert length(prism_points) == 6 "prism must have exactly 6 vertices"
     Mloc = zeros(9, 9)
@@ -953,7 +1025,8 @@ function _polytope_2form_local_mass(m::Metric{3}, top::Cell{3},
         Mloc, faces = _hex_local_mass_2form(m, top.points)
         return Mloc, [collect(f) for f in faces]      # 6 quad faces (4 verts each)
     elseif n_pts == 6
-        return _polytope_2form_via_subtets(m, top, sub_tets, _PRISM_FACES)
+        Mloc, faces = _prism_local_mass_2form(m, top.points)
+        return Mloc, [collect(f) for f in faces]
     elseif n_pts == 5
         return _polytope_2form_via_subtets(m, top, sub_tets, _PYRAMID_FACES)
     else
