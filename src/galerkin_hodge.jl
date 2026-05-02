@@ -904,8 +904,14 @@ function _assemble_galerkin_polytope_1form(m::Metric{3},
 end
 
 # Polytope-aware 2-form (face) mass dispatcher. Hex uses RT_0 isoparametric;
-# prism and pyramid not yet implemented (raise an informative error).
-function _polytope_2form_local_mass(m::Metric{3}, top::Cell{3})
+# tet uses the existing simplicial Whitney M_2; prism and pyramid use sub-tet
+# decomposition with area-weighted projection from sub-tet faces to polytope
+# faces (each polytope quad face = 2 sub-tet triangle faces; the polytope face
+# Whitney form has uniform-flux extension on the quad with no bubble DOFs on
+# internal sub-tet faces — a pragmatic construction sufficient for SPD ★_2
+# inner products on hex/prism/pyramid mixed meshes).
+function _polytope_2form_local_mass(m::Metric{3}, top::Cell{3},
+    sub_tets::Vector{SignedSimpleSimplex{3}})
     n_pts = length(top.points)
     if n_pts == 4
         s = Simplex(top)
@@ -914,13 +920,103 @@ function _polytope_2form_local_mass(m::Metric{3}, top::Cell{3})
     elseif n_pts == 8
         Mloc, faces = _hex_local_mass_2form(m, top.points)
         return Mloc, [collect(f) for f in faces]      # 6 quad faces (4 verts each)
-    elseif n_pts == 5
-        error("Galerkin Hodge k=3 on a pyramid: face mass not yet implemented " *
-              "(planned via sub-tet decomposition with internal-face Schur condensation).")
     elseif n_pts == 6
-        error("Galerkin Hodge k=3 on a prism: face mass not yet implemented.")
+        return _polytope_2form_via_subtets(m, top, sub_tets, _PRISM_FACES)
+    elseif n_pts == 5
+        return _polytope_2form_via_subtets(m, top, sub_tets, _PYRAMID_FACES)
     else
         error("Galerkin Hodge k=3: unsupported top-dim cell with $n_pts vertices")
+    end
+end
+
+# Generic sub-tet projection construction for polytope k=3 mass. Each polytope
+# face is a triangle (1 sub-tet face) or quad (2 sub-tet faces). The polytope
+# face Whitney form has uniform flux 1 across the polytope face; restricted to
+# a sub-tet face σ ⊂ F it is `(A_σ / A_F) · ψ_σ` where ψ_σ is the sub-tet's
+# normalized Whitney 2-form. So the projection coefficient is T[σ, F] = A_σ / A_F.
+# Internal sub-tet faces (those NOT lying on a polytope face) are set to 0
+# (no bubble DOFs in this construction). Then M_polytope = T^T M_subtet T.
+function _polytope_2form_via_subtets(m::Metric{3}, top::Cell{3},
+    sub_tets::Vector{SignedSimpleSimplex{3}},
+    face_local_indices::Tuple)
+    poly_pts = top.points
+    point_to_local = Dict{Point{3}, Int}()
+    for (i, p) in enumerate(poly_pts)
+        point_to_local[p] = i
+    end
+    # Polytope faces: vertex-set → polytope face index; also store area + outward
+    # normal direction (for the sub-tet face sign correction below).
+    face_set_to_F = Dict{Set{Int}, Int}()
+    face_areas    = Float64[]
+    face_normals  = Vector{NTuple{3, Float64}}()
+    for (F, group) in enumerate(face_local_indices)
+        face_set_to_F[Set(group)] = F
+        verts = [poly_pts[i] for i in group]
+        push!(face_areas, _polygon_area(m, verts))
+        # Polytope face canonical normal from first 3 vertices via right-hand rule
+        # in the canonical (group) ordering.
+        v1 = verts[1].coords; v2 = verts[2].coords; v3 = verts[3].coords
+        e12 = (v2[1]-v1[1], v2[2]-v1[2], v2[3]-v1[3])
+        e13 = (v3[1]-v1[1], v3[2]-v1[2], v3[3]-v1[3])
+        n_face = (e12[2]*e13[3] - e12[3]*e13[2],
+                  e12[3]*e13[1] - e12[1]*e13[3],
+                  e12[1]*e13[2] - e12[2]*e13[1])
+        nrm = sqrt(n_face[1]^2 + n_face[2]^2 + n_face[3]^2)
+        push!(face_normals, (n_face[1]/nrm, n_face[2]/nrm, n_face[3]/nrm))
+    end
+
+    n_F = length(face_local_indices)
+    Mloc = zeros(n_F, n_F)
+    # Process each sub-tet τ: compute its 4×4 Whitney 2-form mass and project.
+    for (s_simple, _sign) in sub_tets
+        s = Simplex(s_simple)
+        M_tau, triplets = _local_mass_2form(m, s)   # 4×4, 4 triangle faces
+        T_tau = zeros(4, n_F)
+        for (α, t) in enumerate(triplets)
+            face_local_set = Set(point_to_local[s.points[i]] for i in t)
+            # Find the polytope face F (if any) that CONTAINS this sub-tet face.
+            F = 0
+            for (F_cand, group) in enumerate(face_local_indices)
+                if issubset(face_local_set, Set(group)); F = F_cand; break; end
+            end
+            F == 0 && continue   # internal sub-tet face: no polytope DOF
+            tri_pts = [s.points[i] for i in t]
+            A_sigma = _polygon_area(m, tri_pts)
+            T_tau[α, F] = A_sigma / face_areas[F]
+            # Sign correction: align the sub-tet face's Whitney-2-form normal
+            # with the polytope face's canonical outward normal. The Whitney
+            # 2-form `w_{ijk}` of `_local_mass_2form` for triplet (i,j,k) gives
+            # a vector field whose direction is determined by the cyclic order
+            # of vertices in `t`. Compute the sub-tet face normal in the same
+            # cyclic order; if it points opposite to the polytope face normal,
+            # flip the sign.
+            v1 = tri_pts[1].coords; v2 = tri_pts[2].coords; v3 = tri_pts[3].coords
+            e12 = (v2[1]-v1[1], v2[2]-v1[2], v2[3]-v1[3])
+            e13 = (v3[1]-v1[1], v3[2]-v1[2], v3[3]-v1[3])
+            n_sigma = (e12[2]*e13[3] - e12[3]*e13[2],
+                       e12[3]*e13[1] - e12[1]*e13[3],
+                       e12[1]*e13[2] - e12[2]*e13[1])
+            n_F_face = face_normals[F]
+            dot_n = n_sigma[1]*n_F_face[1] + n_sigma[2]*n_F_face[2] + n_sigma[3]*n_F_face[3]
+            if dot_n < 0
+                T_tau[α, F] = -T_tau[α, F]
+            end
+        end
+        Mloc .+= T_tau' * M_tau * T_tau
+    end
+    return Mloc, [collect(g) for g in face_local_indices]
+end
+
+# Polygon (3 or 4 vertices in 3D) area via cross-product. For triangles this
+# is exact; for quads we triangulate (1, 2, 3) ∪ (1, 3, 4) and sum.
+function _polygon_area(m::Metric{3}, pts::Vector{Point{3}})
+    if length(pts) == 3
+        return volume(m, Simplex([pts[1], pts[2], pts[3]]))
+    elseif length(pts) == 4
+        return volume(m, Simplex([pts[1], pts[2], pts[3]])) +
+               volume(m, Simplex([pts[1], pts[3], pts[4]]))
+    else
+        error("polygon area only supports 3 or 4 vertices, got $(length(pts))")
     end
 end
 
@@ -951,7 +1047,7 @@ function _assemble_galerkin_polytope_2form(m::Metric{3},
 
     rows, cols, vals = Int[], Int[], Float64[]
     for top in comp.cells[4]
-        Mloc, face_groups = _polytope_2form_local_mass(m, top)
+        Mloc, face_groups = _polytope_2form_local_mass(m, top, tcomp.simplices[top])
         n_loc = length(face_groups)
         global_idx = Vector{Int}(undef, n_loc)
         signs      = Vector{Float64}(undef, n_loc)

@@ -251,3 +251,36 @@ The current hex implementation assumes the hex's first vertex is the
 "bottom-left" corner and the edges align with positive `(x, y, z)`.
 General trilinear hexes (rotated, sheared, or with curved edges)
 require the isoparametric mapping with numerical quadrature.
+
+### Polytope `k=3` (face / 2-form) mass
+
+`galerkin_hodge(m, tcomp::TriangulatedComplex, 3)` is implemented for
+all four polytope types. Three different constructions:
+
+- **Tet** — existing simplicial Whitney 2-form (`_local_mass_2form`).
+- **Hex** — lowest-order Raviart-Thomas (RT_0) on the reference cube
+  with isoparametric **contravariant** Piola pull-back
+  `ψ^p = J ψ^r / det J`. 6 face DOFs; mass evaluated by 2 × 2 × 2
+  Gauss-Legendre quadrature. On the unit cube the local mass is
+  block-diagonal in three axis groups, each block `[[1/3, -1/6], [-1/6, 1/3]]`.
+- **Prism / pyramid** — sub-tet decomposition with **area-weighted
+  projection**: each polytope quad face = 2 sub-tet triangle faces, and
+  the polytope-face Whitney 2-form has uniform flux 1 across the
+  polytope face. The projection matrix `T[σ, F] = ±A_σ / A_F` (sign
+  flip if the sub-tet face normal points opposite to the polytope face
+  normal), and `M_polytope = T^T M_subtet T` summed over sub-tets.
+  Internal sub-tet faces (those not lying on a polytope face) get no
+  bubble DOFs in this construction (set to 0 in T) — a pragmatic choice
+  sufficient for SPD `★_2` inner products. 5 face DOFs each.
+
+Sign convention for global assembly is uniform across all polytope
+types: triangle faces use permutation parity vs the global face cell's
+stored vertex order; quad faces use cyclic equivalence (+1 if some
+cyclic shift matches, −1 if the reversed cycle matches). Verified by
+the equivalence test (`galerkin_hodge: TriangulatedComplex method
+matches CellComplex on simplicial`) for k=3 on tet meshes — polytope
+dispatcher gives identical M_2 to the simplicial Whitney path.
+
+For mixed `hex + prism + pyramid` meshes the assembler now produces a
+global SPD M_2 of size `(n_faces × n_faces)`, enabling 1-form Hodge
+Laplacian and other `★_2`-based formulations on polytope meshes.

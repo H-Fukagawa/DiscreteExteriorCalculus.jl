@@ -391,6 +391,41 @@ end
     @test minimum(eigvals(Symmetric(Matrix(M1)))) > 0
 end
 
+@testset "galerkin_hodge k=3: prism + pyramid face mass via sub-tet projection" begin
+    m = Metric(3)
+    # Prism: 5 face DOFs (3 quad sides + 2 triangle ends), should be SPD
+    prism = [Point(0.0,0.0,0.0), Point(1.0,0.0,0.0), Point(0.5,1.0,0.0),
+             Point(0.0,0.0,1.0), Point(1.0,0.0,1.0), Point(0.5,1.0,1.0)]
+    tcomp = DEC.polyhedral_complex([(:prism, prism)])
+    orient!(tcomp.complex)
+    M2 = galerkin_hodge(m, tcomp, 3)
+    @test size(M2) == (5, 5)
+    @test maximum(abs, M2 - M2') < 1e-12
+    @test minimum(eigvals(Symmetric(Matrix(M2)))) > 0
+
+    # Pyramid: 5 face DOFs (1 quad base + 4 triangle laterals), should be SPD
+    pyr = [Point(0.0,0.0,0.0), Point(0.0,1.0,0.0), Point(1.0,1.0,0.0),
+           Point(1.0,0.0,0.0), Point(0.5,0.5,0.5)]
+    tcomp = DEC.polyhedral_complex([(:pyramid, pyr)])
+    orient!(tcomp.complex)
+    M2 = galerkin_hodge(m, tcomp, 3)
+    @test size(M2) == (5, 5)
+    @test maximum(abs, M2 - M2') < 1e-12
+    @test minimum(eigvals(Symmetric(Matrix(M2)))) > 0
+
+    # Mixed mesh: hex + prism + pyramid (3 isolated cells), should assemble cleanly
+    shift = (dx, p) -> Point(p.coords[1] + dx, p.coords[2], p.coords[3])
+    hex_pts = [Point(c...) for c in DEC._HEX_REF_VERT_BIT]
+    prism_pts = [shift(2.0, p) for p in prism]
+    pyr_pts = [shift(4.0, p) for p in pyr]
+    tcomp = DEC.polyhedral_complex([(:hex, hex_pts), (:prism, prism_pts),
+                                    (:pyramid, pyr_pts)])
+    orient!(tcomp.complex)
+    M2 = galerkin_hodge(m, tcomp, 3)
+    @test maximum(abs, M2 - M2') < 1e-12
+    @test minimum(eigvals(Symmetric(Matrix(M2)))) > 0
+end
+
 @testset "galerkin_hodge: hex RT_0 face mass — structural" begin
     m = Metric(3)
     function _hex_lattice(n)
