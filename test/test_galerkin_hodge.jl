@@ -804,6 +804,38 @@ end
     end
 end
 
+@testset "Pyramid extended assembly: bubble DOFs as global edges" begin
+    # Diagnostic: the extended assembly is callable as research helper.
+    # M_1_ext is SPD; d_0_ext is consistent with the polytope d_0 in the
+    # first n_polytope rows; bubble edges have new global indices.
+    m = Metric(3)
+    function pyr_lat(n)
+        pts = Dict{NTuple{3,Int}, Point{3}}()
+        for i in 0:n, j in 0:n, k in 0:n; pts[(i,j,k)] = Point(i/n, j/n, k/n); end
+        pyramids = Vector{Vector{Point{3}}}()
+        for i in 0:n-1, j in 0:n-1, k in 0:n-1
+            c8 = [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+                  pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+            ctr = Point((i+0.5)/n, (j+0.5)/n, (k+0.5)/n)
+            push!(pyramids, [c8[1], c8[4], c8[3], c8[2], ctr])
+            push!(pyramids, [c8[5], c8[6], c8[7], c8[8], ctr])
+            push!(pyramids, [c8[1], c8[2], c8[6], c8[5], ctr])
+            push!(pyramids, [c8[2], c8[3], c8[7], c8[6], ctr])
+            push!(pyramids, [c8[3], c8[4], c8[8], c8[7], ctr])
+            push!(pyramids, [c8[4], c8[1], c8[5], c8[8], ctr])
+        end
+        return DEC.pyramidal_complex(pyramids)
+    end
+    tcomp = pyr_lat(2)
+    orient!(tcomp.complex)
+    M1_ext, d0_ext, n_e_polytope, n_e_bubble = DEC._pyramid_extended_assembly(m, tcomp)
+    @test size(M1_ext) == (n_e_polytope + n_e_bubble, n_e_polytope + n_e_bubble)
+    @test size(d0_ext) == (n_e_polytope + n_e_bubble, length(tcomp.complex.cells[1]))
+    @test maximum(abs, M1_ext - M1_ext') < 1e-12
+    @test minimum(eigvals(Symmetric(Matrix(M1_ext)))) > -1e-10  # SPD up to round-off
+    @test n_e_bubble > 0    # pyramid lattice has bubble edges
+end
+
 @testset "GH pyramid M_1: Duffy quadrature converged to <1e-4" begin
     # Tier 3.1: tensor-product Gauss-Legendre with Duffy substitution
     # ξ = (1-ζ)ξ', η = (1-ζ)η' absorbs the apex (1-ζ)^{-k} singularity in

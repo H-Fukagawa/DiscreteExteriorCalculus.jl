@@ -1,4 +1,4 @@
-using SparseArrays: sparse, SparseMatrixCSC
+using SparseArrays: sparse, SparseMatrixCSC, findnz, spzeros
 using LinearAlgebra: dot, inv
 
 # Whitney / Galerkin Hodge stars for simplicial complexes.
@@ -1613,4 +1613,165 @@ function _pyramid_local_mass_1form(m::Metric{3}, pyr_points::Vector{Point{3}})
     M_DD = M_full[9:10, 9:10]   # 2 × 2 SPD
     M_eff = M_PP - M_PD * (M_DD \ M_PD')
     return M_eff, collect(_PYR_EDGES)
+end
+
+# ============================================================================
+# Pyramid extended assembly: bubble DOFs as INDEPENDENT global edges.
+#
+# Construction (callable as a research/diagnostic helper — NOT routed through
+# the Hodge Laplacian solver, see note below):
+#   - Each pyramid contributes 2 base-diagonal bubble edges with vertex
+#     endpoints at v_1↔v_3 and v_2↔v_4 (canonical-frame indices).
+#   - Bubble edges across adjacent pyramids that share a base face are
+#     DEDUPLICATED (same physical vertex pair → same global bubble edge).
+#   - d_0_ext is (n_polytope_edges + n_bubble_edges) × n_v.
+#   - M_1_ext is the same square dimension; assembled per-pyramid from the
+#     full 10×10 Bedrosian Type-II local mass.
+#
+# Why this DOESN'T improve Hodge Laplacian convergence:
+# The bubble Whitney 1-form has `d(φ_{13}) = 2 dN_1 ∧ dN_3` which restricts
+# to the base face as `2(η - ξ) dξ∧dη`, having mean ZERO over the base
+# (symmetric in (η,ξ)→(ξ,η) up to sign). So in the LOWEST-ORDER (RT_0)
+# face basis (constant flux per face), `d(φ_{bubble})` projects to 0 — the
+# bubble edges are in the kernel of the discrete d_1 operator. This makes
+# the bubble DOFs unconstrained by `d_1^T M_2 d_1` in the Hodge Laplacian
+# saddle-point block, leading to a near-singular system when bubbles are
+# included as global DOFs (numerically observed: solve produces err ≈ 1e97
+# on n=4 pyramid lattice).
+#
+# To genuinely improve pyramid Hodge Laplacian convergence to h², a
+# higher-order Whitney basis with consistent de Rham closure between the
+# 1-form and 2-form spaces is needed (Bedrosian/GH paper construction).
+# That is genuinely research-grade work beyond the scope of this iteration.
+function _pyramid_extended_assembly(m::Metric{3}, tcomp::TriangulatedComplex{3, 4})
+    comp = tcomp.complex
+    n_v = length(comp.cells[1])
+    n_e_polytope = length(comp.cells[2])
+
+    point_to_v_idx = Dict{Point{3}, Int}()
+    for (i, vc) in enumerate(comp.cells[1])
+        point_to_v_idx[vc.points[1]] = i
+    end
+    polytope_edge_lookup = Dict{Set{Point{3}}, Cell{3}}()
+    for e in comp.cells[2]
+        polytope_edge_lookup[Set(c.points[1] for c in e.children)] = e
+    end
+    polytope_edge_idx = Dict{Cell{3}, Int}()
+    for (i, e) in enumerate(comp.cells[2])
+        polytope_edge_idx[e] = i
+    end
+
+    # First pass: discover bubble edges, with deduplication on physical
+    # vertex pair. Canonical orientation = lower-vertex-index → higher-
+    # vertex-index, which makes the local-vs-global sign comparison uniform.
+    bubble_lookup = Dict{Set{Point{3}}, Tuple{Int, Point{3}, Point{3}}}()
+    next_bubble_idx = n_e_polytope
+    for top in comp.cells[4]
+        length(top.points) == 5 || continue
+        # Canonicalize pyramid vertex order (same as in `_pyramid_local_mass_1form_ext`).
+        pts_in = top.points
+        v1c = pts_in[1].coords; v2c = pts_in[2].coords
+        v4c = pts_in[4].coords; v5c = pts_in[5].coords
+        n_base = ((v2c[2]-v1c[2])*(v4c[3]-v1c[3]) - (v2c[3]-v1c[3])*(v4c[2]-v1c[2]),
+                  (v2c[3]-v1c[3])*(v4c[1]-v1c[1]) - (v2c[1]-v1c[1])*(v4c[3]-v1c[3]),
+                  (v2c[1]-v1c[1])*(v4c[2]-v1c[2]) - (v2c[2]-v1c[2])*(v4c[1]-v1c[1]))
+        apex_dir = (v5c[1]-v1c[1], v5c[2]-v1c[2], v5c[3]-v1c[3])
+        swapped = (n_base[1]*apex_dir[1] + n_base[2]*apex_dir[2] + n_base[3]*apex_dir[3]) > 0
+        canonical_pts = swapped ?
+            [pts_in[1], pts_in[4], pts_in[3], pts_in[2], pts_in[5]] :
+            collect(pts_in)
+        # Bubble vertex pairs in canonical frame: (v_1, v_3) and (v_2, v_4)
+        for (a, b) in ((1, 3), (2, 4))
+            v_a = canonical_pts[a]; v_b = canonical_pts[b]
+            key = Set([v_a, v_b])
+            if !haskey(bubble_lookup, key)
+                next_bubble_idx += 1
+                idx_a = point_to_v_idx[v_a]; idx_b = point_to_v_idx[v_b]
+                from_v = idx_a < idx_b ? v_a : v_b
+                to_v   = idx_a < idx_b ? v_b : v_a
+                bubble_lookup[key] = (next_bubble_idx, from_v, to_v)
+            end
+        end
+    end
+    n_e_total = next_bubble_idx
+    n_e_bubble = n_e_total - n_e_polytope
+
+    # Build d_0_ext: copy polytope d_0, append bubble rows.
+    d0_poly = exterior_derivative(comp, 1)
+    d0_rows, d0_cols, d0_vals = findnz(d0_poly)
+    d0_rows = collect(d0_rows); d0_cols = collect(d0_cols); d0_vals = collect(d0_vals)
+    for (key, (idx, from_v, to_v)) in bubble_lookup
+        push!(d0_rows, idx); push!(d0_cols, point_to_v_idx[from_v]); push!(d0_vals, -1.0)
+        push!(d0_rows, idx); push!(d0_cols, point_to_v_idx[to_v]);   push!(d0_vals, +1.0)
+    end
+    d0_ext = sparse(d0_rows, d0_cols, d0_vals, n_e_total, n_v)
+
+    # Second pass: build M_1_ext. For each pyramid, compute full 10×10 local
+    # mass and project to global indices (8 polytope + 2 bubble).
+    rows, cols, vals = Int[], Int[], Float64[]
+    for top in comp.cells[4]
+        if length(top.points) == 5
+            M_full, edges_ext = _pyramid_local_mass_1form_ext(m, top.points)
+            # `edges_ext = _PYR_EDGES_EXT = ((1,2),(1,4),(2,3),(3,4),(1,5),(2,5),(3,5),(4,5),(1,3),(2,4))`
+            # in INPUT vertex labelling (the ext function permutes for swap).
+            global_idx = Vector{Int}(undef, 10)
+            signs      = Vector{Float64}(undef, 10)
+            for (α, (from_l, to_l)) in enumerate(edges_ext)
+                p_from = top.points[from_l]
+                p_to   = top.points[to_l]
+                key = Set([p_from, p_to])
+                if α <= 8
+                    e = polytope_edge_lookup[key]
+                    global_idx[α] = polytope_edge_idx[e]
+                    v_pos = nothing; v_neg = nothing
+                    for vc in e.children
+                        if vc.parents[e]
+                            v_pos = vc.points[1]
+                        else
+                            v_neg = vc.points[1]
+                        end
+                    end
+                    signs[α] = (v_neg == p_from && v_pos == p_to) ? 1.0 : -1.0
+                else
+                    bubble_idx, from_v, to_v = bubble_lookup[key]
+                    global_idx[α] = bubble_idx
+                    signs[α] = (from_v == p_from && to_v == p_to) ? 1.0 : -1.0
+                end
+            end
+            for i in 1:10, j in 1:10
+                push!(rows, global_idx[i])
+                push!(cols, global_idx[j])
+                push!(vals, signs[i] * signs[j] * M_full[i, j])
+            end
+        else
+            # Non-pyramid: existing polytope local mass on 8/12/etc edges.
+            Mloc, edge_pairs = _polytope_1form_local_mass(m, top)
+            n_loc = length(edge_pairs)
+            global_idx = Vector{Int}(undef, n_loc)
+            signs      = Vector{Float64}(undef, n_loc)
+            for (α, (from_l, to_l)) in enumerate(edge_pairs)
+                p_from = top.points[from_l]
+                p_to   = top.points[to_l]
+                e = polytope_edge_lookup[Set([p_from, p_to])]
+                global_idx[α] = polytope_edge_idx[e]
+                v_pos = nothing; v_neg = nothing
+                for vc in e.children
+                    if vc.parents[e]
+                        v_pos = vc.points[1]
+                    else
+                        v_neg = vc.points[1]
+                    end
+                end
+                signs[α] = (v_neg == p_from && v_pos == p_to) ? 1.0 : -1.0
+            end
+            for i in 1:n_loc, j in 1:n_loc
+                push!(rows, global_idx[i])
+                push!(cols, global_idx[j])
+                push!(vals, signs[i] * signs[j] * Mloc[i, j])
+            end
+        end
+    end
+    M1_ext = sparse(rows, cols, vals, n_e_total, n_e_total)
+
+    return (M1_ext, d0_ext, n_e_polytope, n_e_bubble)
 end
