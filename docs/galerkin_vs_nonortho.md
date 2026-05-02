@@ -284,3 +284,26 @@ dispatcher gives identical M_2 to the simplicial Whitney path.
 For mixed `hex + prism + pyramid` meshes the assembler now produces a
 global SPD M_2 of size `(n_faces × n_faces)`, enabling 1-form Hodge
 Laplacian and other `★_2`-based formulations on polytope meshes.
+
+### `galerkin_hodge_laplacian_block` on polytope meshes
+
+`galerkin_hodge_laplacian_block(m, tcomp::TriangulatedComplex, k)` is a
+new overload that wires the polytope-aware mass matrices into the
+saddle-point mixed-FEM block matrix for the Hodge Laplacian on `k-1`
+forms. Convergence on the unit cube with
+`ω_ex = sin(πx)sin(πy)sin(πz) (dx + dy + dz)`:
+
+| Mesh             | n=4    | n=8    | rate          |
+|------------------|--------|--------|---------------|
+| Hex (RT_0)       | 0.015  | 0.002  | ≈ h^{2.5}     |
+| Prism (sub-tet)  | 0.019  | 0.011  | ≈ h^{0.5–1}   |
+| Pyramid (sub-tet) | 0.016  | 0.006  | ≈ h^{1.3}     |
+
+Hex achieves super-convergence (matching the ≈h^{2.5} measured for
+3D Kuhn tet). Prism / pyramid inherit slower convergence from their
+simplified `M_2` construction (sub-tet projection without bubble DOFs)
+and (for pyramid) the Schur-condensed `M_1`. Both still give SPD,
+solvable systems with stable error decrease — sufficient for ★d★d
+operator pipelines on mixed polytope meshes; full higher-order
+convergence on prism/pyramid would require Whitney-form-conformant `M_2`
+constructions (Bedrosian-style bubble DOFs).

@@ -210,6 +210,38 @@ function galerkin_hodge_laplacian_block(m::Metric{N}, comp::CellComplex{N, K},
     return (A, M_mid)
 end
 
+"""
+    galerkin_hodge_laplacian_block(m, tcomp::TriangulatedComplex, k)
+
+`TriangulatedComplex` overload — uses the polytope-aware `galerkin_hodge`
+mass matrices (hex Nédélec / RT_0, prism + pyramid sub-tet, etc.) so the
+mixed-FEM Hodge Laplacian works on hex / prism / pyramid / mixed
+polytope meshes. The d operators are structural and read directly from
+`tcomp.complex`. See the `CellComplex` docstring for the mathematical
+formulation; the polytope variant has identical block structure.
+
+For pyramid-containing meshes, M_k is the Schur-condensed 8×8 effective
+mass on the polytope edges (see Bedrosian Type-II construction in
+`galerkin_hodge.jl`), so `K = d_0' M_1 d_0` differs from the FEM
+stiffness by a low-rank correction per pyramid; for Poisson stiffness
+use `galerkin_stiffness(m, tcomp)` directly.
+"""
+function galerkin_hodge_laplacian_block(m::Metric{N}, tcomp::TriangulatedComplex{N, K},
+    k::Int) where {N, K}
+    @assert 2 <= k < K (
+        "galerkin_hodge_laplacian_block needs M_{k-1}, M_k, M_{k+1} — " *
+        "supported range is 2 ≤ k ≤ K-1, got k=$k, K=$K")
+    M_lower = galerkin_hodge(m, tcomp, k - 1)
+    M_mid   = galerkin_hodge(m, tcomp, k)
+    M_upper = galerkin_hodge(m, tcomp, k + 1)
+    d_lower = exterior_derivative(tcomp.complex, k - 1)
+    d_upper = exterior_derivative(tcomp.complex, k)
+
+    A = [M_lower                  -transpose(d_lower) * M_mid;
+         M_mid * d_lower           transpose(d_upper) * M_upper * d_upper]
+    return (A, M_mid)
+end
+
 # Barycentric-coordinate gradients on a full-dim simplex.
 # Returns a Vector of (K = N+1) gradient SVectors, one per simplex vertex.
 # ∇λ_i is the Euclidean gradient of the i-th barycentric coordinate; it is

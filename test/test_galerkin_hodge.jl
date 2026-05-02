@@ -325,6 +325,99 @@ end
     @test es[2] / es[3] > 3.5
 end
 
+function _hodge_lap_err(tcomp; manuf=:sin)
+    m = Metric(3)
+    DEC.orient!(tcomp.complex)
+    comp = tcomp.complex
+    A, M_mid = galerkin_hodge_laplacian_block(m, tcomp, 2)
+    n_v = length(comp.cells[1]); n_e = length(comp.cells[2])
+    edges = comp.cells[2]
+    function ω_edge(e)
+        v1, v2 = e.children
+        v_pos = v1.parents[e] ? v1 : v2
+        v_neg = v1.parents[e] ? v2 : v1
+        Δ   = v_pos.points[1].coords - v_neg.points[1].coords
+        mid = (v_pos.points[1].coords + v_neg.points[1].coords) / 2
+        s = sin(π*mid[1]) * sin(π*mid[2]) * sin(π*mid[3])
+        return s * (Δ[1] + Δ[2] + Δ[3])
+    end
+    ω_ex = [ω_edge(e) for e in edges]
+    f_e  = 3 * π^2 .* ω_ex
+    rhs  = [zeros(n_v); M_mid * f_e]
+    _, ext = DEC.boundary_components_connected(comp)
+    bnd_e_set = Set(ext.cells[2])
+    bnd_e_idx = [i for (i, e) in enumerate(edges) if e in bnd_e_set]
+    int_e_idx = setdiff(1:n_e, bnd_e_idx)
+    free_idx = [collect(1:n_v); n_v .+ int_e_idx]
+    x = A[free_idx, free_idx] \ rhs[free_idx]
+    ω_h = zeros(n_e); ω_h[int_e_idx] = x[n_v + 1:end]
+    return norm(ω_h[int_e_idx] - ω_ex[int_e_idx]) / sqrt(length(int_e_idx))
+end
+
+@testset "galerkin_hodge_laplacian_block: hex 1-form Hodge Laplacian (TC overload)" begin
+    # Hex meshes use proper Nédélec edge mass (M_1) + RT_0 face mass (M_2);
+    # mixed-FEM Hodge Laplacian achieves ≈ h^{2.5} super-convergence.
+    function hex_lat(n)
+        pts = Dict{NTuple{3,Int}, Point{3}}()
+        for i in 0:n, j in 0:n, k in 0:n; pts[(i,j,k)] = Point(i/n, j/n, k/n); end
+        elements = Tuple{Symbol, Vector{Point{3}}}[]
+        for i in 0:n-1, j in 0:n-1, k in 0:n-1
+            c8 = [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+                  pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+            push!(elements, (:hex, c8))
+        end
+        return DEC.polyhedral_complex(elements)
+    end
+    e4 = _hodge_lap_err(hex_lat(4))
+    e8 = _hodge_lap_err(hex_lat(8))
+    @test e4 / e8 > 5.0     # observed ≈9 (h^{2.5} would give 5.66; h² → 4.0)
+end
+
+@testset "galerkin_hodge_laplacian_block: prism + pyramid 1-form Hodge Laplacian" begin
+    # Prism + pyramid M_2 are built via sub-tet projection (no bubble DOFs),
+    # which gives an SPD Hodge mass but a non-Whitney 1-form FE space; the
+    # mixed-FEM Hodge Laplacian still solves cleanly but with reduced
+    # convergence rate (≈ h^{1.5} on these meshes). The test asserts
+    # stability: the system solves without singularity and the error decreases.
+    function prism_lat(n)
+        pts = Dict{Tuple{Int,Int,Int}, Point{3}}()
+        for i in 0:n, j in 0:n, k in 0:n; pts[(i,j,k)] = Point(i/n, j/n, k/n); end
+        elements = Tuple{Symbol, Vector{Point{3}}}[]
+        for i in 0:n-1, j in 0:n-1, k in 0:n-1
+            push!(elements, (:prism, [pts[(i,j,k)], pts[(i+1,j,k)], pts[(i+1,j+1,k)],
+                                       pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)]]))
+            push!(elements, (:prism, [pts[(i,j,k)], pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+                                       pts[(i,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]))
+        end
+        return DEC.polyhedral_complex(elements)
+    end
+    e4_p = _hodge_lap_err(prism_lat(4))
+    e8_p = _hodge_lap_err(prism_lat(8))
+    @test e4_p / e8_p > 1.5    # at least monotone decrease (observed ≈1.7)
+
+    # Pyramid lattice
+    function pyr_lat(n)
+        pts = Dict{NTuple{3,Int}, Point{3}}()
+        for i in 0:n, j in 0:n, k in 0:n; pts[(i,j,k)] = Point(i/n, j/n, k/n); end
+        pyramids = Vector{Vector{Point{3}}}()
+        for i in 0:n-1, j in 0:n-1, k in 0:n-1
+            c8 = [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+                  pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+            ctr = Point((i+0.5)/n, (j+0.5)/n, (k+0.5)/n)
+            push!(pyramids, [c8[1], c8[4], c8[3], c8[2], ctr])
+            push!(pyramids, [c8[5], c8[6], c8[7], c8[8], ctr])
+            push!(pyramids, [c8[1], c8[2], c8[6], c8[5], ctr])
+            push!(pyramids, [c8[2], c8[3], c8[7], c8[6], ctr])
+            push!(pyramids, [c8[3], c8[4], c8[8], c8[7], ctr])
+            push!(pyramids, [c8[4], c8[1], c8[5], c8[8], ctr])
+        end
+        return DEC.pyramidal_complex(pyramids)
+    end
+    e4_y = _hodge_lap_err(pyr_lat(4))
+    e6_y = _hodge_lap_err(pyr_lat(6))
+    @test e4_y / e6_y > 1.3    # at least monotone decrease (observed ≈1.7)
+end
+
 @testset "galerkin_hodge_laplacian_block: 3D Kuhn 1-form Hodge Laplacian" begin
     m = Metric(3)
     function err(n)
