@@ -258,6 +258,31 @@ end
     @test_throws AssertionError galerkin_blended_mass(M0, 1.1)
 end
 
+@testset "galerkin_blended_mass: θ=0.25 beats consistent and lumped on Poisson" begin
+    # Numerical verification of the headline claim in galerkin_vs_nonortho.md:
+    # blending with θ ≈ 0.25 produces a substantially smaller pointwise error
+    # than either the consistent (θ=1) or fully lumped (θ=0) endpoints.
+    m = Metric(2)
+    _, tcomp = DEC.triangulated_lattice([1.0, 0.0], [0.0, 1.0], 16, 16)
+    orient!(tcomp.complex)
+    comp = tcomp.complex
+    verts = comp.cells[1]
+    u_ex = [sin(π*v.points[1].coords[1]) * sin(π*v.points[1].coords[2]) for v in verts]
+    f = 2 * π^2 .* u_ex
+    M0, K = galerkin_laplacian(m, comp)
+    _, ext = DEC.boundary_components_connected(comp)
+    bnd = Set(ext.cells[1])
+    int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+    err(Mθ) = norm(K[int_idx, int_idx] \ (Mθ * f)[int_idx] - u_ex[int_idx]) /
+              sqrt(length(int_idx))
+    e_cons    = err(M0)
+    e_lumped  = err(galerkin_lumped_mass(M0))
+    e_blend25 = err(galerkin_blended_mass(M0, 0.25))
+    # Blend at θ=0.25 must be at least 5× more accurate than each endpoint.
+    @test e_blend25 < e_cons / 5
+    @test e_blend25 < e_lumped / 5
+end
+
 @testset "galerkin_laplacian: Poisson solve on 3D Kuhn unit cube (h²)" begin
     m = Metric(3)
     function err(n)
