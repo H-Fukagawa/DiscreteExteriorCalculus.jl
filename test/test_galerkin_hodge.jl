@@ -180,6 +180,42 @@ end
     @test es[2] / es[3] > 3.5
 end
 
+@testset "galerkin_lumped_mass: Kuhn tet pointwise improvement" begin
+    # Lumped mass (row-sum diagonalization of M_0) gives ≈ 5× pointwise
+    # accuracy improvement over consistent M_0 on 3D Kuhn-tet, while
+    # preserving h² convergence. Verified for n=4..12.
+    m = Metric(3)
+    function err_pair(n)
+        tcomp = _tet_lattice_3d([1.0,0,0], [0,1.0,0], [0,0,1.0], n)
+        orient!(tcomp.complex)
+        comp = tcomp.complex
+        verts = comp.cells[1]
+        u_ex = [sin(π*v.points[1].coords[1])*sin(π*v.points[1].coords[2])*
+                sin(π*v.points[1].coords[3]) for v in verts]
+        f = 3 * π^2 .* u_ex
+        _, ext = DEC.boundary_components_connected(comp)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        # Consistent
+        M0c, K = galerkin_laplacian(m, comp)
+        u_c = K[int_idx, int_idx] \ (M0c * f)[int_idx]
+        # Lumped
+        M0l, _ = galerkin_laplacian_lumped(m, comp)
+        u_l = K[int_idx, int_idx] \ (M0l * f)[int_idx]
+        return (norm(u_c - u_ex[int_idx]) / sqrt(length(int_idx)),
+                norm(u_l - u_ex[int_idx]) / sqrt(length(int_idx)))
+    end
+    ec4, el4 = err_pair(4)
+    ec8, el8 = err_pair(8)
+    # Lumped is substantially more accurate
+    @test el4 < 0.4 * ec4
+    @test el8 < 0.4 * ec8
+    # Lumped maintains h² (ratio at h-halving > 3.5)
+    @test el4 / el8 > 3.5
+    # Consistent also h² (sanity)
+    @test ec4 / ec8 > 3.5
+end
+
 @testset "galerkin_laplacian: Poisson solve on 3D Kuhn unit cube (h²)" begin
     m = Metric(3)
     function err(n)

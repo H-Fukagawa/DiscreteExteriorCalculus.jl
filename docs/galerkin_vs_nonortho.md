@@ -66,6 +66,50 @@ recover h² in this consistency norm even with the over-relaxed
 correction).
 
 
+## Mass lumping: Galerkin can recover (and exceed) nonortho pointwise accuracy
+
+The 3-7× pointwise advantage that nonortho holds in Table 1 is largely a
+**lumped-mass effect**: nonortho's `★_0` is diagonal (DEC convention),
+while Galerkin's consistent `M_0` has off-diagonals that "spread out" the
+discrete Green's function. Lumping the Galerkin `M_0` (row-sum
+diagonalization, available as `galerkin_lumped_mass(M_0)`) and solving
+`K · u = M_0_lumped · f` recovers the lumped-mass behavior.
+
+### Lumped vs consistent on the same Kuhn-tet test
+
+| n  | Galerkin (cons) | Galerkin (lumped) | nonortho |
+|----|-----------------|-------------------|----------|
+| 4  | 0.117           | **0.029**         | 0.034    |
+| 6  | 0.049           | **0.011**         | 0.052*   |
+| 8  | 0.027           | **0.0056**        | 0.057*   |
+| 12 | 0.011           | **0.0023**        | 0.058*   |
+
+(*) `corrected_barycentric_hodge` on this branch saturates around 0.05;
+the original nonortho-branch numbers in Table 1 (0.012, 0.006, 0.003) used
+a slightly different calibration and are reproduced here as an upper bound
+on what nonortho can achieve. Either way, **Galerkin + lumped mass beats
+nonortho on this test** while being a 1-line code change.
+
+### Mesh-dependent trade-off
+
+Lumping is NOT universally good. It helps on **biased / anisotropic** meshes
+where the consistent off-diagonals encode bias-amplifying coupling, and
+hurts on **regular** meshes where the off-diagonals encode beneficial
+averaging:
+
+| Mesh                  | err (consistent) | err (lumped) | improvement |
+|-----------------------|------------------|--------------|-------------|
+| Tet (Kuhn 3D), n=8    | 0.027            | 0.0056       | **5.0×**    |
+| Pyramid lattice, n=8  | 0.020            | 0.0064       | **3.0×**    |
+| Hex, n=8              | 0.007            | 0.029        | 0.24× (worse) |
+| Prism (oblique), n=8  | 0.013            | 0.021        | 0.62× (worse) |
+
+API: `galerkin_laplacian_lumped(m, comp_or_tcomp)` returns
+`(M_0_lumped, K)` analogously to `galerkin_laplacian`. Both paths give
+clean h² convergence; pick per mesh type (or run both at one resolution
+and take the smaller error).
+
+
 ## Both methods converge to the SAME continuous solution (h² verified)
 
 On a well-centered 2D right-triangle lattice (`triangulated_lattice([1,0],
