@@ -569,62 +569,10 @@ function _hex_local_mass_1form(::Metric{3}, hex_points::Vector{Point{3}})
     return Mloc, edge_pairs
 end
 
-# Global assembly for axis-aligned hex meshes. Errors out if the mesh
-# contains non-hex top-dim cells (mixed polytope mesh).
-function _assemble_galerkin_hex_1form(m::Metric{3}, tcomp::TriangulatedComplex{3, 4})
-    comp = tcomp.complex
-    n_e = length(comp.cells[2])
-
-    # Edge lookup by unordered vertex-Point pair.
-    edge_lookup = Dict{Set{Point{3}}, Cell{3}}()
-    for e in comp.cells[2]
-        edge_lookup[Set(c.points[1] for c in e.children)] = e
-    end
-    edge_idx = Dict{Cell{3}, Int}()
-    for (i, e) in enumerate(comp.cells[2])
-        edge_idx[e] = i
-    end
-
-    rows, cols, vals = Int[], Int[], Float64[]
-    for top in comp.cells[4]
-        if length(top.points) != 8
-            error("_assemble_galerkin_hex_1form: top-dim cell has $(length(top.points)) " *
-                  "vertices — only 8-vertex (hex) cells supported")
-        end
-
-        Mloc, edge_pairs = _hex_local_mass_1form(m, top.points)
-        # For each local edge, find global edge cell and its sign vs canonical orientation.
-        global_idx = Vector{Int}(undef, 12)
-        signs = Vector{Float64}(undef, 12)
-        for (α, (from_l, to_l)) in enumerate(edge_pairs)
-            p_from = top.points[from_l]
-            p_to   = top.points[to_l]
-            e = edge_lookup[Set([p_from, p_to])]
-            global_idx[α] = edge_idx[e]
-            # Determine global d_0 orientation
-            v_pos = nothing
-            v_neg = nothing
-            for vc in e.children
-                if vc.parents[e]
-                    v_pos = vc.points[1]
-                else
-                    v_neg = vc.points[1]
-                end
-            end
-            # Local canonical: from p_from to p_to.
-            # Global d_0: from v_neg to v_pos.
-            # Sign +1 if (v_neg, v_pos) == (p_from, p_to), else −1.
-            signs[α] = (v_neg == p_from && v_pos == p_to) ? 1.0 : -1.0
-        end
-
-        for i in 1:12, j in 1:12
-            push!(rows, global_idx[i])
-            push!(cols, global_idx[j])
-            push!(vals, signs[i] * signs[j] * Mloc[i, j])
-        end
-    end
-    return sparse(rows, cols, vals, n_e, n_e)
-end
+# (`_assemble_galerkin_hex_1form` was the hex-only assembly used in earlier
+# iterations; it has been superseded by the polytope-aware
+# `_assemble_galerkin_polytope_1form` below — see that function for the
+# active sign convention and the canonical local→global edge map.)
 
 # ============================================================================
 # Prism (lowest-order Nédélec wedge element) Whitney 1-form mass matrix.
@@ -780,9 +728,21 @@ function _polytope_1form_local_mass(m::Metric{3}, top::Cell{3})
     end
 end
 
-# Generic polytope-mesh 1-form mass assembly. Handles tet / prism / hex
-# uniformly via `_polytope_1form_local_mass`. (Replaces the hex-only
-# `_assemble_galerkin_hex_1form` from the previous commit.)
+# Generic polytope-mesh 1-form mass assembly. Handles tet / prism / hex /
+# pyramid uniformly via `_polytope_1form_local_mass`.
+#
+# Sign convention (uniform across all polytope types):
+#   - Each local edge is given a canonical orientation (from_l → to_l) that
+#     comes from the polytope's local edge tuple, e.g. `_PYR_EDGES = ((1,2), …)`
+#     (always with i < j).
+#   - The global edge `e ∈ comp.cells[2]` carries an independent DEC orientation
+#     specified by the parents/children flags (v_neg → v_pos).
+#   - The local→global sign is +1 if (v_neg, v_pos) == (p_from, p_to), else −1
+#     (line 819). The Whitney 1-form `φ_α` flips sign under reversal, so the
+#     local mass entry transforms as `M_global[i,j] = sign[i] · sign[j] · M_local[i,j]`.
+# This is identical to the simplicial Whitney M_1 sign handling, verified by
+# the equivalence test `galerkin_hodge: TriangulatedComplex method matches
+# CellComplex on simplicial` for k=2 on tet meshes.
 function _assemble_galerkin_polytope_1form(m::Metric{3},
     tcomp::TriangulatedComplex{3, 4})
     comp = tcomp.complex
