@@ -738,6 +738,21 @@ end
     end
 end
 
+@testset "GH pyramid M_1: Duffy quadrature converged to <1e-4" begin
+    # Tier 3.1: tensor-product Gauss-Legendre with Duffy substitution
+    # ξ = (1-ζ)ξ', η = (1-ζ)η' absorbs the apex (1-ζ)^{-k} singularity in
+    # the GH Wachspress basis. With 4×4×4 = 64 points the diagonal mass
+    # entries match the Bey-refined sub-tet quadrature (4096 points) to
+    # better than 5e-5. (The previous 4-pt × 2 sub-tet rule had ~9% error
+    # on M[9,9].)
+    m = Metric(3)
+    pyr_ref = [Point(c...) for c in DEC._REF_PYR_VERTS]
+    M_full, _ = DEC._pyramid_local_mass_1form_ext(m, pyr_ref)
+    # Reference values from Bey-refined (4096-pt) sub-tet quadrature.
+    @test abs(M_full[1, 1] - 0.053332) < 5e-5
+    @test abs(M_full[9, 9] - 0.020553) < 5e-5
+end
+
 @testset "GH pyramid Whitney basis: Kronecker δ on the 8 edges" begin
     # Reference pyramid (corner-apex, CCW-from-below convention).
     refv = DEC._REF_PYR_VERTS

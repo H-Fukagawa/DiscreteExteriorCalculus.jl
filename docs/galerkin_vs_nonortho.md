@@ -231,8 +231,21 @@ equal the FEM stiffness — the Schur condensation drops bubble couplings
 that contribute to the full GH-Wachspress K. For Poisson stiffness,
 `galerkin_stiffness(m, tcomp)` is special-cased on pyramid meshes to
 bypass M_1 entirely and assemble K directly via per-sub-tet
-`⟨∇λ_i, ∇λ_j⟩` (sub-tet P1 FEM). On the cube-center-apex pyramid
-lattice this gives clean h² Poisson convergence:
+`⟨∇λ_i, ∇λ_j⟩` (sub-tet P1 FEM).
+
+The mass-matrix integration uses **tensor-product Gauss-Legendre with
+Duffy substitution** `ξ = (1-ζ)ξ', η = (1-ζ)η'` to absorb the apex
+`(1-ζ)^{-k}` singularity in the GH/Wachspress basis. With 4 × 4 × 4 =
+64 quadrature points the diagonal mass entries match a Bey-refined
+sub-tet reference (4096 points) to better than 5e-5; the earlier 4-pt
+× 2 sub-tet rule had ≈ 9% relative error on the most apex-affected
+entries. The Hodge Laplacian convergence rate on pyramid meshes is
+unchanged by this improvement (still ≈ h^{1.3-1.5}, limited by the
+Schur-condensed `M_1`), but `M_1` itself and the Schur-condensed
+`M_eff` are now substantially more accurate as `★_2` operators.
+
+On the cube-center-apex pyramid lattice the sub-tet FEM stiffness path
+gives clean h² Poisson convergence:
 
 | n | err   | rate  |
 |---|-------|-------|

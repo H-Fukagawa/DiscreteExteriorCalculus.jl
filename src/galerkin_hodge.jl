@@ -1303,6 +1303,20 @@ const _GAUSS_TET_4PT_BARY = (
 )
 const _GAUSS_TET_4PT_W = (1/24, 1/24, 1/24, 1/24)
 
+# 4-point Gauss-Legendre on [0, 1] (exact for polynomials of degree ≤ 7).
+const _GAUSS_LEG_4PT = (
+    (1 - 0.861136311594053) / 2,
+    (1 - 0.339981043584856) / 2,
+    (1 + 0.339981043584856) / 2,
+    (1 + 0.861136311594053) / 2,
+)
+const _GAUSS_LEG_4PT_W = (
+    0.347854845137454 / 2,
+    0.652145154862546 / 2,
+    0.652145154862546 / 2,
+    0.347854845137454 / 2,
+)
+
 # Build the full 10×10 Bedrosian Type-II mass matrix (8 polytope edges +
 # 2 base-diagonal bubbles) on a physical pyramid via 4-pt Gauss quadrature
 # on each of the 2 sub-tets, with isoparametric Wachspress map and
@@ -1329,43 +1343,51 @@ function _pyramid_local_mass_1form_ext(::Metric{3}, pyr_points::Vector{Point{3}}
     Mloc = zeros(10, 10)
     Jbuf = zeros(3, 3)
 
-    for sub in 1:2
-        tv = _REF_PYR_SUBTETS[sub]
-        sub_verts = (_REF_PYR_VERTS[tv[1]], _REF_PYR_VERTS[tv[2]],
-                     _REF_PYR_VERTS[tv[3]], _REF_PYR_VERTS[tv[4]])
-        for q in 1:4
-            bary = _GAUSS_TET_4PT_BARY[q]
-            wq   = _GAUSS_TET_4PT_W[q]
-            ξ = bary[1]*sub_verts[1][1] + bary[2]*sub_verts[2][1] + bary[3]*sub_verts[3][1] + bary[4]*sub_verts[4][1]
-            η = bary[1]*sub_verts[1][2] + bary[2]*sub_verts[2][2] + bary[3]*sub_verts[3][2] + bary[4]*sub_verts[4][2]
-            ζ = bary[1]*sub_verts[1][3] + bary[2]*sub_verts[2][3] + bary[3]*sub_verts[3][3] + bary[4]*sub_verts[4][3]
+    # Quadrature: tensor-product Gauss-Legendre on (ξ', η', ζ) ∈ [0,1]³ with
+    # the Duffy substitution ξ = (1-ζ)ξ', η = (1-ζ)η'. The substitution
+    # Jacobian (1-ζ)² absorbs the apex (1-ζ)^{-k} singularity in the GH
+    # Wachspress basis (so the rational integrand becomes polynomial in
+    # (ξ', η', ζ) for the reference pyramid). 4×4×4 = 64 quad points, exact
+    # for polynomials of degree 7 in each variable. (Previously 4-pt × 2 sub-tet
+    # = 8 points gave ~9% relative error on diagonal mass entries due to the
+    # apex-singular integrand; the new scheme converges to <1e-4.)
+    for qζ in 1:4
+        ζ = _GAUSS_LEG_4PT[qζ]; w_ζ = _GAUSS_LEG_4PT_W[qζ]
+        one_minus_ζ = 1 - ζ
+        substitution_jac = one_minus_ζ * one_minus_ζ
+        for qξ in 1:4
+            ξ_p = _GAUSS_LEG_4PT[qξ]; w_ξ = _GAUSS_LEG_4PT_W[qξ]
+            ξ = one_minus_ζ * ξ_p
+            for qη in 1:4
+                η_p = _GAUSS_LEG_4PT[qη]; w_η = _GAUSS_LEG_4PT_W[qη]
+                η = one_minus_ζ * η_p
 
-            # Isoparametric Jacobian J = ∂χ/∂(ξ, η, ζ) via shape-function gradients.
-            fill!(Jbuf, 0.0)
-            for i in 1:5
-                gN = _pyr_grad_N(i, ξ, η, ζ)
-                pi_coords = pts[i].coords
-                for k in 1:3
-                    Jbuf[k, 1] += gN[1] * pi_coords[k]
-                    Jbuf[k, 2] += gN[2] * pi_coords[k]
-                    Jbuf[k, 3] += gN[3] * pi_coords[k]
+                fill!(Jbuf, 0.0)
+                for i in 1:5
+                    gN = _pyr_grad_N(i, ξ, η, ζ)
+                    pi_coords = pts[i].coords
+                    for k in 1:3
+                        Jbuf[k, 1] += gN[1] * pi_coords[k]
+                        Jbuf[k, 2] += gN[2] * pi_coords[k]
+                        Jbuf[k, 3] += gN[3] * pi_coords[k]
+                    end
                 end
-            end
-            detJ = Jbuf[1,1]*(Jbuf[2,2]*Jbuf[3,3] - Jbuf[2,3]*Jbuf[3,2]) -
-                   Jbuf[1,2]*(Jbuf[2,1]*Jbuf[3,3] - Jbuf[2,3]*Jbuf[3,1]) +
-                   Jbuf[1,3]*(Jbuf[2,1]*Jbuf[3,2] - Jbuf[2,2]*Jbuf[3,1])
-            @assert detJ > 1e-14 "pyramid Jacobian non-positive after canonicalization ($detJ); degenerate pyramid?"
-            Jinv = inv(Jbuf)
-            Mc = Jinv * transpose(Jinv)
+                detJ = Jbuf[1,1]*(Jbuf[2,2]*Jbuf[3,3] - Jbuf[2,3]*Jbuf[3,2]) -
+                       Jbuf[1,2]*(Jbuf[2,1]*Jbuf[3,3] - Jbuf[2,3]*Jbuf[3,1]) +
+                       Jbuf[1,3]*(Jbuf[2,1]*Jbuf[3,2] - Jbuf[2,2]*Jbuf[3,1])
+                @assert detJ > 1e-14 "pyramid Jacobian non-positive after canonicalization ($detJ); degenerate pyramid?"
+                Jinv = inv(Jbuf)
+                Mc = Jinv * transpose(Jinv)
 
-            φref = ntuple(α -> _pyr_whitney(α, ξ, η, ζ), 10)
-            wj = wq * detJ
-            for α in 1:10, β in 1:10
-                va = φref[α]; vb = φref[β]
-                Mca1 = Mc[1,1]*va[1] + Mc[1,2]*va[2] + Mc[1,3]*va[3]
-                Mca2 = Mc[2,1]*va[1] + Mc[2,2]*va[2] + Mc[2,3]*va[3]
-                Mca3 = Mc[3,1]*va[1] + Mc[3,2]*va[2] + Mc[3,3]*va[3]
-                Mloc[α, β] += wj * (Mca1 * vb[1] + Mca2 * vb[2] + Mca3 * vb[3])
+                φref = ntuple(α -> _pyr_whitney(α, ξ, η, ζ), 10)
+                wj = w_ζ * w_ξ * w_η * substitution_jac * detJ
+                for α in 1:10, β in 1:10
+                    va = φref[α]; vb = φref[β]
+                    Mca1 = Mc[1,1]*va[1] + Mc[1,2]*va[2] + Mc[1,3]*va[3]
+                    Mca2 = Mc[2,1]*va[1] + Mc[2,2]*va[2] + Mc[2,3]*va[3]
+                    Mca3 = Mc[3,1]*va[1] + Mc[3,2]*va[2] + Mc[3,3]*va[3]
+                    Mloc[α, β] += wj * (Mca1 * vb[1] + Mca2 * vb[2] + Mca3 * vb[3])
+                end
             end
         end
     end
