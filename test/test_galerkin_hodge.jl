@@ -277,6 +277,57 @@ end
 end
 
 # ============================================================================
+# Tier 3.3: numerical confirmation that Galerkin and the lumped-mass DEC
+# (★_0^{-1} d_0' ★_1 d_0, "nonortho") Poisson solutions converge to the SAME
+# continuous solution as h → 0 — the two discrete operators differ but their
+# inverses agree on smooth solutions to leading order. On a 2D right-triangle
+# mesh (well-centered, circumcenters lie on hypotenuse midpoints), both
+# methods exhibit clean h² convergence to u_ex AND |u_G − u_NN| → 0 at h².
+# ============================================================================
+@testset "galerkin vs nonortho: same continuous limit (2D well-centered)" begin
+    m = Metric(2)
+    function err_compare(n)
+        _, tcomp = DEC.triangulated_lattice([1.0, 0.0], [0.0, 1.0], n, n)
+        orient!(tcomp.complex)
+        mesh = Mesh(tcomp, circumcenter(m))
+        comp = tcomp.complex
+        verts = comp.cells[1]
+        u_ex = [sin(π*v.points[1].coords[1])*sin(π*v.points[1].coords[2]) for v in verts]
+        f = 2 * π^2 .* u_ex
+        _, ext = DEC.boundary_components_connected(comp)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        # Galerkin
+        M0, K_g = galerkin_laplacian(m, comp)
+        u_g = zeros(length(verts))
+        u_g[int_idx] = K_g[int_idx, int_idx] \ (M0 * f)[int_idx]
+        # Nonortho (circumcenter ★_1 + lumped ★_0)
+        star0 = DEC.circumcenter_hodge(m, mesh, 1, true)
+        star1 = DEC.circumcenter_hodge(m, mesh, 2, true)
+        d0 = DEC.exterior_derivative(comp, 1)
+        L = transpose(d0) * star1 * d0
+        u_n = zeros(length(verts))
+        u_n[int_idx] = L[int_idx, int_idx] \ (star0 * f)[int_idx]
+        return (norm(u_g[int_idx] - u_ex[int_idx]) / sqrt(length(int_idx)),
+                norm(u_n[int_idx] - u_ex[int_idx]) / sqrt(length(int_idx)),
+                norm(u_g[int_idx] - u_n[int_idx]) / sqrt(length(int_idx)))
+    end
+    eg4, en4, dgn4 = err_compare(8)
+    eg8, en8, dgn8 = err_compare(16)
+    eg16, en16, dgn16 = err_compare(32)
+    # Galerkin h² convergence (ratio at h-halving > 3.5)
+    @test eg4 / eg8 > 3.5
+    @test eg8 / eg16 > 3.5
+    # Nonortho h² convergence
+    @test en4 / en8 > 3.5
+    @test en8 / en16 > 3.5
+    # Most importantly: the DIFFERENCE |u_G − u_NN| converges to 0 at h²,
+    # confirming both methods limit to the SAME continuous solution.
+    @test dgn4 / dgn8  > 3.5
+    @test dgn8 / dgn16 > 3.5
+end
+
+# ============================================================================
 # 1-form Hodge Laplacian via mixed-FEM (saddle-point) Galerkin.
 # Find (σ, ω) such that  M_0 σ − d_0' M_1 ω = 0  and
 #                        M_1 d_0 σ + d_1' M_2 d_1 ω = M_1 f.

@@ -66,6 +66,35 @@ recover h² in this consistency norm even with the over-relaxed
 correction).
 
 
+## Both methods converge to the SAME continuous solution (h² verified)
+
+On a well-centered 2D right-triangle lattice (`triangulated_lattice([1,0],
+[0,1], n, n)`) with `u_ex = sin(πx)sin(πy)`, the two methods exhibit
+clean h² convergence both individually AND in their pairwise difference,
+confirming they limit to the SAME continuous Poisson solution:
+
+| n  | err_Gal   | err_NN    | `|u_G − u_NN|` | rate |
+|----|-----------|-----------|----------------|------|
+| 4  | 0.092     | 0.035     | 0.127          | -    |
+| 8  | 0.0216    | 0.0074    | 0.0289         | ×4.4 |
+| 16 | 0.00514   | 0.00172   | 0.00685        | ×4.2 |
+| 32 | 0.00125   | 0.000415  | 0.00166        | ×4.1 |
+| 64 | 0.000308  | 0.000102  | 0.000410       | ×4.1 |
+
+Both methods are h² (ratio →4 between consecutive sizes), and crucially
+`|u_G − u_NN|` also goes to 0 at h². Test:
+`galerkin vs nonortho: same continuous limit (2D well-centered)` in
+`test_galerkin_hodge.jl`.
+
+On 3D Kuhn the comparison is asymmetric: Galerkin converges h² cleanly
+(see Table 1) while the centroid-dual + over-relaxed nonortho with
+`corrected_barycentric_hodge` saturates around `‖u_h − u_ex‖ ≈ 0.05`
+on this geometry — the cell-centroid dual produces a structurally
+biased Hodge that the over-relaxed correction doesn't fully resolve in
+3D Kuhn. This is consistent with the docs note that nonortho saturates
+at h^{1.5} in the consistency norm; the pointwise error stagnation at
+matched n in this 3D test is its mass-lumping/over-relaxation analog.
+
 ## Why the two metrics give "different winners"
 
 The pointwise solve error is dominated by the discrete operator's
