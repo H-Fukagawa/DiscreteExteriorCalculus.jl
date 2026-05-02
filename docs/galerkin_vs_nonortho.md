@@ -388,3 +388,165 @@ Truly improving prism/pyramid `M_2` convergence requires either
 edge/face count in d_0/d_1 assembly — significant API change), or
 (b) implementing a true polytope `RT_0`/Nédélec face basis (analogous
 to the hex isoparametric construction). Future work.
+
+
+## Diagrams
+
+ASCII diagrams for the trickier polytope constructions, intended for
+implementers planning to extend or modify the polytope FE family.
+
+### Pyramid sub-tet decomposition (canonical reference frame)
+
+The corner-apex reference pyramid has vertices
+
+    v_1 = (0, 0, 0)        v_4 = (1, 0, 0)
+    v_2 = (0, 1, 0)        v_5 = (0, 0, 1)   <-- apex
+    v_3 = (1, 1, 0)
+
+and is decomposed into 2 sub-tetrahedra by the base diagonal v_1↔v_3:
+
+         v_5 (apex)
+          /|\
+         / | \
+        /  |  \
+       /   |   \
+      / sub-tet \                _PYRAMID_TETS = ((1,2,3,5), (1,3,4,5))
+     /  τ_1 |τ_2 \
+    v_2----v_3----v_4
+     \    / \    /
+      \  /   \  /                base diagonal v_1↔v_3 (chosen) — INTERNAL
+       v_1----v_3                splits the base square into 2 triangles
+
+    base square (1,4,3,2)        the "other" diagonal v_2↔v_4 — UNUSED
+
+Bedrosian Type-II uses BOTH diagonals as bubble DOFs (10-edge basis = 8
+polytope edges + 2 base-diagonal bubbles). Both diagonals are needed for
+de Rham closure: ∇N_2 expansion has residual `φ_{24}^raw`, ∇N_4 has
+`φ_{24}^raw` too — one diagonal alone closes only vertices 1, 3, 5.
+
+### Two adjacent pyramids sharing a base face — the (ξ,η)→(x,y) swap
+
+Two pyramid clusters in a 2-cube stack share their base faces. Pyramid
+A sits below (apex pointing up), pyramid B sits above (apex pointing
+down). The shared base face has 4 vertices but their LOCAL labelings
+in pyr A vs pyr B are different cyclic orderings:
+
+         pyramid A                         pyramid B
+       (apex above)                      (apex below)
+                                                                .
+       v_5_A (above)                          .
+         \                                   .
+          \                              .
+           v_3_A=v_3_B                  base face (shared)
+          /|                              /|
+         / |  η_A axis                  / |  ξ_B axis
+        /  |                           /  |
+       /   |                          /   |
+   v_2_A   v_4_A                   v_4_B   v_2_B
+       \   |                          \   |
+        \  |                           \  |
+         \ |  ξ_A axis                  \ |  η_B axis
+          \|                              \|
+           v_1_A=v_1_B
+                                              .
+                                                v_5_B (below)
+
+  pyr A base map: χ_A(ξ, η, 0) = (ξ, η, 0)        # identity
+  pyr B base map: χ_B(ξ, η, 0) = (η, ξ, 0)        # SWAP ξ ↔ η
+
+The SAME physical edge from (0,0,0) to (0,1,0) is local edge (1,2) in
+pyr A and local edge (1,4) in pyr B (different local indices!). The
+covariant Piola pull-back J^{-T} on the basis function exactly
+compensates this swap so both pyramids give identical tangential traces
+on the shared face — verified numerically (max diff = 0 to machine
+precision); test `GH pyramid Whitney basis: face conformity on shared
+base face`. This is why no special "matching" code is needed for
+adjacent pyramids: the FE space is conformant via this Piola identity.
+
+### RT_0 face basis directions (lowest-order Hdiv)
+
+For each face F of a polytope, ψ_F is a vector field with constant
+unit flux through F and zero flux through all other faces.
+
+Hex (6 faces, axis-aligned reference cube):
+
+      face_z+ ψ = (0, 0, ζ)                top face, n=+ẑ
+                ↑↑↑↑
+       ┌────────┐
+      /│       /│
+     / │ ←x⁻ ψ=(ξ−1,0,0)
+    ┌──┴─────┐  │
+    │  │     │  │     y+ ψ=(0, η, 0) →
+    │  └─────│──┘
+    │ /      │ /  ← face_x+ ψ=(ξ, 0, 0)
+    │/       │/
+    └────────┘
+      ↓↓↓↓
+   face_z− ψ = (0, 0, ζ−1)              bottom face, n=−ẑ
+
+Each ψ has only ONE non-zero component (axis-aligned with its face's
+normal); the 6×6 mass on the unit cube is block-diagonal in 3 axis
+groups, each block `[[1/3, -1/6], [-1/6, 1/3]]`.
+
+Prism (5 faces):
+
+       v_4─────v_5     ψ_top  = (0, 0, 2ζ)            top
+      /│       │
+     / │       │       ψ_F_3  = (ξ, η-1, 0)           side opposite v_3
+    /  │   v_6 │
+   v_1─│───v_2 │       ψ_F_4  = (ξ, η, 0)             side opposite v_1
+       │       │
+       │   v_3 │       ψ_F_5  = (ξ-1, η, 0)           side opposite v_2
+       │  /
+       │ /                                  ψ_bot  = (0, 0, -2(1-ζ))
+       │/                                          bottom (n=-ẑ)
+       └
+
+Side basis functions are 2D triangle RT_0 extended trivially in axial
+direction. Bottom/top are constant-axial (no in-plane component).
+
+Pyramid (5 faces, corner-apex):
+
+           v_5 (apex)            ψ_F_1 (base, n=+ẑ from cyclic):
+            /\                       (-ξ, -η, 1-ζ)        polynomial
+           /  \                  ψ_F_2 (lateral 1-2-5):
+          /    \                     (2 - 2ξ/(1-ζ), 0, 0)
+         / lateral
+        /  faces  \               ψ_F_3 (lateral 2-3-5):
+       /  contain   \                 (0, -2η/(1-ζ), 0)
+      /  apex (1/(1-ζ)\
+     / singularity)    \         ψ_F_4 (lateral 3-4-5):
+    v_2────────────v_3                (-2ξ/(1-ζ), 0, 0)
+     │ \           / │
+     │  \         /  │           ψ_F_5 (lateral 4-1-5):
+     │   v_1────v_4  │               (0, 2 - 2η/(1-ζ), 0)
+     │  base (n=-ẑ outward)│
+     └──────────────┘
+
+Lateral basis functions have a 1/(1-ζ) singularity at the apex (z=ζ=1)
+but are bounded inside the pyramid since ξ, η ≤ 1-ζ. The Duffy
+substitution `ξ = (1-ζ)ξ'`, `η = (1-ζ)η'` with the (1-ζ)² Jacobian
+absorbs the singularity for quadrature.
+
+### Mixed-mesh layout (hex + pyramid stack)
+
+The h² Poisson convergence test uses a layered mixed mesh: lower half
+hex, upper half pyramid clusters (6 pyramids per cube meeting at the
+cube center). Shared face at z=0.5:
+
+        z=1   ┌───┬───┐
+              │ ▲ │ ▲ │     6 pyramids per cube at top half
+              │/│\│/│\│     (each pyramid base on a cube face,
+        z=0.5 ├─┼─┼─┼─┤      apex at cube center)
+              │   │   │
+              │   │   │     plain hexahedra at bottom half
+              │   │   │
+        z=0   └───┴───┘
+
+      → shared face at z=0.5 = hex's top face (a square) = pyramid's
+        base face (also a square, with vertex layout convention
+        canonicalized). Conformity holds via covariant Piola on
+        the pyramid side; hex Nédélec face basis is RT_0 by
+        construction. The dispatcher (`_polytope_1form_local_mass`,
+        `_polytope_2form_local_mass`) handles cell-by-cell type
+        switching uniformly.
