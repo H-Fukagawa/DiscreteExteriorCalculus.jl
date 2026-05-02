@@ -225,6 +225,9 @@ end
     # k=2 (edge mass) — verifies the polytope dispatch sign convention matches
     # the simplicial Whitney M_1 on a tet mesh (Tier 2.3 verification).
     @test galerkin_hodge(m3, tcomp3.complex, 2) ≈ galerkin_hodge(m3, tcomp3, 2)
+    # k=3 (face mass) — verifies the polytope k=3 dispatcher correctly
+    # handles triangle face permutation parity vs the simplicial Whitney M_2.
+    @test galerkin_hodge(m3, tcomp3.complex, 3) ≈ galerkin_hodge(m3, tcomp3, 3)
 end
 
 # ============================================================================
@@ -386,6 +389,34 @@ end
     @test size(M1) == (n_e, n_e)
     @test M1 ≈ transpose(M1)
     @test minimum(eigvals(Symmetric(Matrix(M1)))) > 0
+end
+
+@testset "galerkin_hodge: hex RT_0 face mass — structural" begin
+    m = Metric(3)
+    function _hex_lattice(n)
+        pts = Dict{NTuple{3,Int}, Point{3}}()
+        for i in 0:n, j in 0:n, k in 0:n; pts[(i,j,k)] = Point(i/n, j/n, k/n); end
+        elements = Tuple{Symbol, Vector{Point{3}}}[]
+        for i in 0:n-1, j in 0:n-1, k in 0:n-1
+            c8 = [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+                  pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+            push!(elements, (:hex, c8))
+        end
+        return DEC.polyhedral_complex(elements)
+    end
+    tcomp = _hex_lattice(2)
+    orient!(tcomp.complex)
+    M2 = galerkin_hodge(m, tcomp, 3)
+    @test size(M2) == (length(tcomp.complex.cells[3]), length(tcomp.complex.cells[3]))
+    @test maximum(abs, M2 - M2') < 1e-12
+    @test minimum(eigvals(Symmetric(Matrix(M2)))) > 0    # SPD
+
+    # Reference unit hex: explicit RT_0 mass should be block-diagonal in 3 axis
+    # groups with each block [[1/3, -1/6], [-1/6, 1/3]].
+    hex_ref = [Point(c...) for c in DEC._HEX_REF_VERT_BIT]
+    M_ref, _ = DEC._hex_local_mass_2form(m, hex_ref)
+    block_z = M_ref[[1, 2], [1, 2]]
+    @test block_z ≈ [1/3 -1/6; -1/6 1/3]
 end
 
 @testset "galerkin_hodge: hex Poisson SOLVE on unit cube reaches h²" begin

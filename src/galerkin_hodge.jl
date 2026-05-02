@@ -81,9 +81,11 @@ function galerkin_hodge(m::Metric{N}, tcomp::TriangulatedComplex{N, K},
         return _assemble_galerkin_polytope_0form(m, tcomp)
     elseif k == 2 && N == 3 && K == 4
         return _assemble_galerkin_polytope_1form(m, tcomp)
+    elseif k == 3 && N == 3 && K == 4
+        return _assemble_galerkin_polytope_2form(m, tcomp)
     else
         error("galerkin_hodge with TriangulatedComplex supports k=1 " *
-              "for any polytope mesh, and k=2 for tet/hex/prism mixes in 3D; " *
+              "(any polytope), k=2/k=3 (tet/hex/prism/pyramid mixes in 3D); " *
               "got k=$k, N=$N, K=$K")
     end
 end
@@ -575,6 +577,120 @@ end
 # active sign convention and the canonical local→global edge map.)
 
 # ============================================================================
+# Hex lowest-order Raviart-Thomas (RT_0) face element — 6 face DOFs.
+#
+# Reference cube [0,1]³ with `_HEX_FACES` ordering (z⁻, z⁺, y⁻, x⁺, y⁺, x⁻).
+# Each face basis ψ_α points along the OUTWARD normal at face α and is zero
+# in the other two coordinate directions. Specifically:
+#   ψ_1 (z⁻, n=-ẑ): (0, 0, ζ−1)        ψ_2 (z⁺, n=+ẑ): (0, 0, ζ)
+#   ψ_3 (y⁻, n=-ŷ): (0, η−1, 0)        ψ_5 (y⁺, n=+ŷ): (0, η, 0)
+#   ψ_6 (x⁻, n=-x̂): (ξ−1, 0, 0)        ψ_4 (x⁺, n=+x̂): (ξ, 0, 0)
+# Kronecker δ on the 6 reference faces: ∫_{face_β} ψ_α · n̂_β dA = δ_{αβ}.
+#
+# Contravariant Piola pull-back for a physical hex via isoparametric trilinear
+# map χ: ψ^p(x) = J(ξ) ψ^r(ξ) / det J(ξ), giving inner product
+#   M[α, β] = ∫_ref ψ_α^r ᵀ (Jᵀ J) ψ_β^r / det J  dξ dη dζ
+# evaluated by 2 × 2 × 2 Gauss-Legendre quadrature (exact for axis-aligned
+# hexes, O(h⁴) for general trilinear maps).
+
+@inline function _hex_ref_rt0(α::Int, ξ::Float64, η::Float64, ζ::Float64)
+    if α == 1                                # z⁻
+        return (0.0, 0.0, ζ - 1)
+    elseif α == 2                            # z⁺
+        return (0.0, 0.0, ζ)
+    elseif α == 3                            # y⁻
+        return (0.0, η - 1, 0.0)
+    elseif α == 4                            # x⁺
+        return (ξ, 0.0, 0.0)
+    elseif α == 5                            # y⁺
+        return (0.0, η, 0.0)
+    else                                     # α == 6, x⁻
+        return (ξ - 1, 0.0, 0.0)
+    end
+end
+
+# Cyclic-equivalent quad orientation sign: returns +1 if `local_quad` matches
+# `global_quad` under some cyclic shift, −1 if matches the reversed cycle, and
+# errors if they aren't permutations of each other.
+function _quad_orient_sign(local_quad::NTuple{4, Int}, global_quad::Vector{Int})
+    @assert length(global_quad) == 4
+    for shift in 0:3
+        match = true
+        for k in 1:4
+            if local_quad[mod(k - 1 + shift, 4) + 1] != global_quad[k]
+                match = false; break
+            end
+        end
+        if match; return +1.0; end
+    end
+    rev = (local_quad[1], local_quad[4], local_quad[3], local_quad[2])
+    for shift in 0:3
+        match = true
+        for k in 1:4
+            if rev[mod(k - 1 + shift, 4) + 1] != global_quad[k]
+                match = false; break
+            end
+        end
+        if match; return -1.0; end
+    end
+    error("local quad $(local_quad) and global quad $(global_quad) don't match cyclically")
+end
+
+# Generic face orientation sign: triangle uses permutation parity, quad uses
+# cyclic equivalence. Used by the polytope 2-form assembler.
+function _face_orient_sign(local_face_verts::Vector{Int}, global_face_verts::Vector{Int})
+    n = length(local_face_verts)
+    if n == 3
+        return _permutation_sign(local_face_verts, global_face_verts)
+    elseif n == 4
+        return _quad_orient_sign(
+            (local_face_verts[1], local_face_verts[2], local_face_verts[3], local_face_verts[4]),
+            global_face_verts)
+    else
+        error("face has $n vertices; expected 3 or 4")
+    end
+end
+
+function _hex_local_mass_2form(::Metric{3}, hex_points::Vector{Point{3}})
+    @assert length(hex_points) == 8 "hex must have exactly 8 vertices"
+    Mloc = zeros(6, 6)
+    Jbuf = zeros(3, 3)
+    for iξ in 1:2, iη in 1:2, iζ in 1:2
+        ξ = _GAUSS_2PT[iξ]; η = _GAUSS_2PT[iη]; ζ = _GAUSS_2PT[iζ]
+        w = _GAUSS_2PT_W[iξ] * _GAUSS_2PT_W[iη] * _GAUSS_2PT_W[iζ]
+
+        fill!(Jbuf, 0.0)
+        for i in 1:8
+            dNξ, dNη, dNζ = _hex_shape_grad(i, ξ, η, ζ)
+            pi_coords = hex_points[i].coords
+            for k in 1:3
+                Jbuf[k, 1] += dNξ * pi_coords[k]
+                Jbuf[k, 2] += dNη * pi_coords[k]
+                Jbuf[k, 3] += dNζ * pi_coords[k]
+            end
+        end
+        detJ = Jbuf[1,1]*(Jbuf[2,2]*Jbuf[3,3] - Jbuf[2,3]*Jbuf[3,2]) -
+               Jbuf[1,2]*(Jbuf[2,1]*Jbuf[3,3] - Jbuf[2,3]*Jbuf[3,1]) +
+               Jbuf[1,3]*(Jbuf[2,1]*Jbuf[3,2] - Jbuf[2,2]*Jbuf[3,1])
+        @assert detJ > 1e-14 "hex Jacobian determinant non-positive at quadrature point ($detJ)"
+        # Mc = Jᵀ J for face elements (contravariant Piola); divide by det J
+        # at the integrand level.
+        Mc = transpose(Jbuf) * Jbuf
+
+        ψref = ntuple(α -> _hex_ref_rt0(α, ξ, η, ζ), 6)
+        wj = w / detJ
+        for α in 1:6, β in 1:6
+            va = ψref[α]; vb = ψref[β]
+            Mca1 = Mc[1,1]*va[1] + Mc[1,2]*va[2] + Mc[1,3]*va[3]
+            Mca2 = Mc[2,1]*va[1] + Mc[2,2]*va[2] + Mc[2,3]*va[3]
+            Mca3 = Mc[3,1]*va[1] + Mc[3,2]*va[2] + Mc[3,3]*va[3]
+            Mloc[α, β] += wj * (Mca1 * vb[1] + Mca2 * vb[2] + Mca3 * vb[3])
+        end
+    end
+    return Mloc, collect(_HEX_FACES)
+end
+
+# ============================================================================
 # Prism (lowest-order Nédélec wedge element) Whitney 1-form mass matrix.
 #
 # A right (axis-aligned) triangular prism has 6 vertices with the codebase
@@ -785,6 +901,75 @@ function _assemble_galerkin_polytope_1form(m::Metric{3},
         end
     end
     return sparse(rows, cols, vals, n_e, n_e)
+end
+
+# Polytope-aware 2-form (face) mass dispatcher. Hex uses RT_0 isoparametric;
+# prism and pyramid not yet implemented (raise an informative error).
+function _polytope_2form_local_mass(m::Metric{3}, top::Cell{3})
+    n_pts = length(top.points)
+    if n_pts == 4
+        s = Simplex(top)
+        Mloc, triplets = _local_mass_2form(m, s)
+        return Mloc, [collect(t) for t in triplets]   # 4 triangle faces (3 verts each)
+    elseif n_pts == 8
+        Mloc, faces = _hex_local_mass_2form(m, top.points)
+        return Mloc, [collect(f) for f in faces]      # 6 quad faces (4 verts each)
+    elseif n_pts == 5
+        error("Galerkin Hodge k=3 on a pyramid: face mass not yet implemented " *
+              "(planned via sub-tet decomposition with internal-face Schur condensation).")
+    elseif n_pts == 6
+        error("Galerkin Hodge k=3 on a prism: face mass not yet implemented.")
+    else
+        error("Galerkin Hodge k=3: unsupported top-dim cell with $n_pts vertices")
+    end
+end
+
+# Generic polytope-mesh 2-form (face) mass assembly. Sign convention:
+#   - Each local face has a canonical vertex ordering from the polytope's
+#     `_HEX_FACES` / triangle triplet. Triangles use permutation parity vs
+#     the global face's stored vertex order; quads use cyclic equivalence
+#     (+1 if some cyclic shift matches, −1 if reversed cycle matches).
+#   - Whitney 2-forms flip sign under face reversal, so the local mass entry
+#     transforms as `M_global[i,j] = sign[i] · sign[j] · M_local[i,j]`.
+function _assemble_galerkin_polytope_2form(m::Metric{3},
+    tcomp::TriangulatedComplex{3, 4})
+    comp = tcomp.complex
+    n_f = length(comp.cells[3])
+
+    point_to_vertex_idx = Dict{Point{3}, Int}()
+    for (i, vc) in enumerate(comp.cells[1])
+        point_to_vertex_idx[vc.points[1]] = i
+    end
+    face_lookup = Dict{Set{Point{3}}, Cell{3}}()
+    for f in comp.cells[3]
+        face_lookup[Set(f.points)] = f
+    end
+    face_idx = Dict{Cell{3}, Int}()
+    for (i, f) in enumerate(comp.cells[3])
+        face_idx[f] = i
+    end
+
+    rows, cols, vals = Int[], Int[], Float64[]
+    for top in comp.cells[4]
+        Mloc, face_groups = _polytope_2form_local_mass(m, top)
+        n_loc = length(face_groups)
+        global_idx = Vector{Int}(undef, n_loc)
+        signs      = Vector{Float64}(undef, n_loc)
+        for (α, group) in enumerate(face_groups)
+            face_pts = [top.points[i] for i in group]
+            f = face_lookup[Set(face_pts)]
+            global_idx[α] = face_idx[f]
+            local_face_verts  = [point_to_vertex_idx[p] for p in face_pts]
+            global_face_verts = [point_to_vertex_idx[p] for p in f.points]
+            signs[α] = _face_orient_sign(local_face_verts, global_face_verts)
+        end
+        for i in 1:n_loc, j in 1:n_loc
+            push!(rows, global_idx[i])
+            push!(cols, global_idx[j])
+            push!(vals, signs[i] * signs[j] * Mloc[i, j])
+        end
+    end
+    return sparse(rows, cols, vals, n_f, n_f)
 end
 
 # ============================================================================
