@@ -442,24 +442,84 @@ function laplace_de_Rham(m::Metric{N}, mesh::Mesh{N, K}, k::Int, primal::Bool) w
     return dδ + δd
 end
 
-export sharp
+export sharp, flat
 """
     sharp(m::Metric{N}, comp::CellComplex{N}, form::AbstractVector{<:Real}) where N
 
 Given a 1-form on a cell complex, approximate a vector of length `N` at each vertex using
-least squares.
+least squares. Works on any `CellComplex` — simplicial or polytope (hex/prism/pyramid)
+— since the algorithm only uses vertex/edge incidence (`comp.cells[1]` and the
+`parents` flags).
+
+For a `TriangulatedComplex` use `sharp(m, tcomp.complex, form)`, which is exposed as
+the `sharp(m, tcomp, form)` overload below.
 """
 function sharp(m::Metric{N}, comp::CellComplex{N}, form::AbstractVector{<:Real}) where N
-    field = Vector{Float64}[]
-    for c in comp.cells[1]
-        mat = zeros(length(c.parents), N)
-        w = zeros(length(c.parents))
+    edge_idx = Dict{Cell{N}, Int}()
+    for (i, e) in enumerate(comp.cells[2])
+        edge_idx[e] = i
+    end
+    field = Vector{Vector{Float64}}(undef, length(comp.cells[1]))
+    for (vi, c) in enumerate(comp.cells[1])
+        n_par = length(c.parents)
+        mat = zeros(n_par, N)
+        w   = zeros(n_par)
         for (row_ind, e) in enumerate(collect(keys(c.parents)))
-            mat[row_ind, :] = sum([x.points[1].coords * (2 * x.parents[e] - 1)
-                for x in e.children])
-            w[row_ind] = form[findfirst(isequal(e), comp.cells[2])]
+            edge_vec = sum(x.points[1].coords * (2 * x.parents[e] - 1) for x in e.children)
+            mat[row_ind, :] .= edge_vec
+            w[row_ind] = form[edge_idx[e]]
         end
-        push!(field, (mat * m.mat) \ w)
+        field[vi] = (mat * m.mat) \ w
     end
     return field
 end
+
+# `TriangulatedComplex` overload — delegates to the CellComplex method.
+sharp(m::Metric{N}, tcomp::TriangulatedComplex{N}, form::AbstractVector{<:Real}) where N =
+    sharp(m, tcomp.complex, form)
+
+"""
+    flat(m::Metric{N}, comp::CellComplex{N}, field::AbstractVector{<:AbstractVector{<:Real}}) where N
+
+Given a vector field sampled at each vertex of `comp`, return a 1-form on edges via
+the midpoint rule:
+
+    flat(X)[e] = ⟨(X[v_neg] + X[v_pos]) / 2, p_pos − p_neg⟩
+
+where `(v_neg, v_pos)` is the global DEC orientation of edge `e`. This is the
+discrete musical isomorphism inverse to `sharp` for piecewise-linear vector fields,
+and gives `flat(sharp(ω)) ≈ ω` at interior nodes (exact for affine fields).
+
+Works on simplicial and polytope `CellComplex` alike.
+"""
+function flat(m::Metric{N}, comp::CellComplex{N},
+    field::AbstractVector{<:AbstractVector{<:Real}}) where N
+    @assert length(field) == length(comp.cells[1]) (
+        "flat: field length $(length(field)) does not match #vertices $(length(comp.cells[1]))")
+    point_to_idx = Dict{Point{N}, Int}()
+    for (i, vc) in enumerate(comp.cells[1])
+        point_to_idx[vc.points[1]] = i
+    end
+    n_e = length(comp.cells[2])
+    form = Vector{Float64}(undef, n_e)
+    for (i, e) in enumerate(comp.cells[2])
+        v_pos = nothing; v_neg = nothing
+        for vc in e.children
+            if vc.parents[e]
+                v_pos = vc.points[1]
+            else
+                v_neg = vc.points[1]
+            end
+        end
+        i_neg = point_to_idx[v_neg]; i_pos = point_to_idx[v_pos]
+        Δ = v_pos.coords - v_neg.coords
+        Xmid = (field[i_neg] .+ field[i_pos]) ./ 2
+        # Metric inner product: ⟨Xmid, Δ⟩_m = Xmid^T m.mat Δ.
+        form[i] = dot(Xmid, m.mat * Δ)
+    end
+    return form
+end
+
+# `TriangulatedComplex` overload — delegates to the CellComplex method.
+flat(m::Metric{N}, tcomp::TriangulatedComplex{N}, field) where N =
+    flat(m, tcomp.complex, field)

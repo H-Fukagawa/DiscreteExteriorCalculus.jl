@@ -1,0 +1,632 @@
+# Galerkin Hodge vs Over-relaxed Non-orthogonal Hodge
+
+Side-by-side comparison of the two Hodge implementations for the
+**3D Kuhn-tet Poisson problem**, the case where their characters differ
+most. All numbers measured on the same machine on a unit cube and a
+skewed parallelepiped using `u(x,y,z) = sin(πξ₁)sin(πξ₂)sin(πξ₃)` (in
+parameter space, so `u = 0` on the slanted boundary).
+
+The two methods solve different operator equations:
+
+- **Galerkin / Whitney** — `K · u = M_0 · f` where `K = d_0' M_1 d_0`
+  is the consistent FEM stiffness and `M_0` is the consistent FEM mass.
+  The discrete `u` is the FEM coefficient.
+
+- **Over-relaxed non-orthogonal** — `L · u = f` (pointwise) where
+  `L = ★_n^{-1} d_dual ★_2 d_0` is the lumped-mass DEC Laplacian with
+  dual mesh built from cell centroids. The discrete `u` approximates
+  `u_exact` at vertex points.
+
+
+## Table 1: Pointwise solve error `‖u_h − u_ex‖_{ℓ²(int)}`
+
+3D Kuhn-tet mesh. Both schemes converge at h²; absolute error magnitudes
+differ.
+
+| Mesh   | n  | Galerkin | nonortho | ratio nono/Gal |
+|--------|----|----------|----------|----------------|
+| UNIT   | 4  | 0.117    | 0.034    | 0.29           |
+| UNIT   | 6  | 0.049    | 0.012    | 0.25           |
+| UNIT   | 8  | 0.027    | 0.006    | 0.23           |
+| UNIT   | 12 | 0.011    | 0.003    | 0.27           |
+| SKEWED | 4  | 0.122    | 0.019    | 0.16           |
+| SKEWED | 6  | 0.052    | 0.008    | 0.15           |
+| SKEWED | 8  | 0.029    | 0.004    | 0.14           |
+| SKEWED | 12 | 0.012    | 0.002    | 0.16           |
+
+**Both achieve ≈ h² convergence**, but nonortho has a 3–7× smaller
+absolute error on this test. The lumped-mass DEC scheme delivers a
+better pointwise approximation to smooth `u` here, which is a
+well-known FEM phenomenon (consistent mass has the right asymptotic
+rate but tends to lose to lumped mass on pointwise error for typical
+smooth manufactured solutions).
+
+
+## Table 2: Weak / consistency residual `‖K u_ex − M_0 f_ex‖` (Galerkin)
+##           and `‖L u_ex − f_ex‖` (nonortho), at interior nodes.
+
+This metric measures how well the discretization satisfies the equation
+when fed the exact continuous solution. It's the natural "discretization
+quality" metric.
+
+3D Kuhn skewed:
+
+| n | Galerkin (super-conv) | nonortho |
+|---|---|---|
+| 4  | 0.073 | 1.73 |
+| 6  | 0.011 (×6.74) | 1.01 (×1.71) |
+| 8  | 0.0027 (×4.04) | 0.62 (×1.62) |
+| 10 | 0.00090 (×3.0) | 0.42 (×1.49) |
+
+**Galerkin shows ≈ h⁴ super-convergence in the weak residual** — a
+strong indication of clean discrete-form orthogonality. The nonortho
+scheme saturates at h^{≈1.5} due to Kuhn-tet asymmetry (the cell-
+centroid dual produces a structurally biased stiffness that cannot
+recover h² in this consistency norm even with the over-relaxed
+correction).
+
+
+## Mass lumping: Galerkin can recover (and exceed) nonortho pointwise accuracy
+
+The 3-7× pointwise advantage that nonortho holds in Table 1 is largely a
+**lumped-mass effect**: nonortho's `★_0` is diagonal (DEC convention),
+while Galerkin's consistent `M_0` has off-diagonals that "spread out" the
+discrete Green's function. Lumping the Galerkin `M_0` (row-sum
+diagonalization, available as `galerkin_lumped_mass(M_0)`) and solving
+`K · u = M_0_lumped · f` recovers the lumped-mass behavior.
+
+### Lumped vs consistent on the same Kuhn-tet test
+
+| n  | Galerkin (cons) | Galerkin (lumped) | nonortho |
+|----|-----------------|-------------------|----------|
+| 4  | 0.117           | **0.029**         | 0.034    |
+| 6  | 0.049           | **0.011**         | 0.052*   |
+| 8  | 0.027           | **0.0056**        | 0.057*   |
+| 12 | 0.011           | **0.0023**        | 0.058*   |
+
+(*) `corrected_barycentric_hodge` on this branch saturates around 0.05;
+the original nonortho-branch numbers in Table 1 (0.012, 0.006, 0.003) used
+a slightly different calibration and are reproduced here as an upper bound
+on what nonortho can achieve. Either way, **Galerkin + lumped mass beats
+nonortho on this test** while being a 1-line code change.
+
+### Mesh-dependent trade-off
+
+Lumping is NOT universally good. It helps on **biased / anisotropic** meshes
+where the consistent off-diagonals encode bias-amplifying coupling, and
+hurts on **regular** meshes where the off-diagonals encode beneficial
+averaging:
+
+| Mesh                  | err (consistent) | err (lumped) | improvement |
+|-----------------------|------------------|--------------|-------------|
+| Tet (Kuhn 3D), n=8    | 0.027            | 0.0056       | **5.0×**    |
+| Pyramid lattice, n=8  | 0.020            | 0.0064       | **3.0×**    |
+| Hex, n=8              | 0.007            | 0.029        | 0.24× (worse) |
+| Prism (oblique), n=8  | 0.013            | 0.021        | 0.62× (worse) |
+
+API: `galerkin_laplacian_lumped(m, comp_or_tcomp)` returns
+`(M_0_lumped, K)` analogously to `galerkin_laplacian`. Both paths give
+clean h² convergence; pick per mesh type (or run both at one resolution
+and take the smaller error).
+
+### RHS integration and blended mass tuning
+
+Two API helpers are available for reducing the pointwise error constant
+without changing the Galerkin stiffness:
+
+- `galerkin_load_vector(m, comp_or_tcomp, f; quad_order=4)` assembles the
+  true P1 load vector `b_i = ∫ φ_i f dV` by quadrature. This avoids the
+  extra nodal-interpolation error in `M_0 * f_at_vertices`.
+- `galerkin_blended_mass(M_0, θ)` builds
+  `M_θ = θ M_0 + (1-θ) M_0_lumped`, with `θ=1` equal to the consistent
+  mass and `θ=0` equal to row-sum lumping. `galerkin_laplacian_blended`
+  returns `(M_θ, K)` directly.
+
+`bench/galerkin_accuracy.jl` compares consistent, lumped, blended, and
+exact-load RHS strategies on the same manufactured problems. On the
+current unit-square and Kuhn-tet tests, `θ≈0.25` gives a notably smaller
+pointwise error constant than either endpoint while retaining the same
+h² convergence rate. This is a tuning strategy, not a universal default:
+regular hex / prism cases should still be checked before replacing the
+consistent mass.
+
+
+## Both methods converge to the SAME continuous solution (h² verified)
+
+On a well-centered 2D right-triangle lattice (`triangulated_lattice([1,0],
+[0,1], n, n)`) with `u_ex = sin(πx)sin(πy)`, the two methods exhibit
+clean h² convergence both individually AND in their pairwise difference,
+confirming they limit to the SAME continuous Poisson solution:
+
+| n  | err_Gal   | err_NN    | `|u_G − u_NN|` | rate |
+|----|-----------|-----------|----------------|------|
+| 4  | 0.092     | 0.035     | 0.127          | -    |
+| 8  | 0.0216    | 0.0074    | 0.0289         | ×4.4 |
+| 16 | 0.00514   | 0.00172   | 0.00685        | ×4.2 |
+| 32 | 0.00125   | 0.000415  | 0.00166        | ×4.1 |
+| 64 | 0.000308  | 0.000102  | 0.000410       | ×4.1 |
+
+Both methods are h² (ratio →4 between consecutive sizes), and crucially
+`|u_G − u_NN|` also goes to 0 at h². Test:
+`galerkin vs nonortho: same continuous limit (2D well-centered)` in
+`test_galerkin_hodge.jl`.
+
+On 3D Kuhn the comparison is asymmetric: Galerkin converges h² cleanly
+(see Table 1) while the centroid-dual + over-relaxed nonortho with
+`corrected_barycentric_hodge` saturates around `‖u_h − u_ex‖ ≈ 0.05`
+on this geometry — the cell-centroid dual produces a structurally
+biased Hodge that the over-relaxed correction doesn't fully resolve in
+3D Kuhn. This is consistent with the docs note that nonortho saturates
+at h^{1.5} in the consistency norm; the pointwise error stagnation at
+matched n in this 3D test is its mass-lumping/over-relaxation analog.
+
+## Why the two metrics give "different winners"
+
+The pointwise solve error is dominated by the discrete operator's
+inverse (= the discrete Green's function), not by the consistency.
+nonortho's lumped-mass lumping plus the over-relaxed correction lands
+on a discrete operator whose *inverse* better approximates the
+continuum Green's function on smooth `u`, even though its consistency
+saturates at h^{1.5} — the inverse smooths out the consistency
+defect to leading order.
+
+Galerkin's `M_0^{-1} K` has near-perfect consistency but its discrete
+operator is FEM-shaped: the inverse acts on the FEM coefficient space,
+not on pointwise vertex values.
+
+Concretely:
+
+- For **stability** and **error analysis** in standard Sobolev norms,
+  Galerkin is the principled choice (FEEC theory, SPD `K`, no dual
+  mesh required).
+
+- For **smooth pointwise PDE solutions** at modest resolution,
+  nonortho's lumped scheme often gives smaller errors per unknown.
+  This is the same trade-off as consistent vs. lumped mass in
+  textbook FEM.
+
+
+## Other characteristics
+
+| Property | Galerkin | nonortho |
+|----------|----------|----------|
+| Symmetry of stiffness | strict SPD | ≈ symmetric (5% asymmetry observed in 2D) |
+| Dual mesh required | no | yes (centroid) |
+| `★★ = ±I` identity | weak only | strict (with caveat: `★_2_dual` not the inverse of corrected `★_2`) |
+| Polytope (hex/prism/pyramid) `k>1` | yes for 3D `k=2,3` | yes (drop-in for `★_2` in 3D) |
+| Polytope `k=1` (vertex mass) | yes | yes |
+| Fits `★d★d` DSL | no (different API) | yes (drop-in for `circumcenter_hodge`) |
+| 2D 1-form Laplacian | h³ via mixed Galerkin | h³ super-convergent on regular skewed lattices |
+| Strict `d² = 0` | yes | yes |
+| Standard FEEC theory | yes | no (FVM-like) |
+
+
+## When to use which
+
+- **Use Galerkin Hodge** if you want SPD systems, no dual mesh, FEM-
+  style error analysis, mesh-skew robustness in the consistency
+  norm, or 3D tet / hex / prism / pyramid polytope support through the
+  Galerkin API.
+
+- **Use over-relaxed non-orthogonal Hodge** if you need the
+  `★d★d` DEC pipeline (existing `differential_operator_sequence`
+  works), diagonal-Hodge polytope support in that pipeline, or just
+  smaller pointwise solve error on smooth manufactured tests at modest
+  `n`.
+
+The two are complementary, not interchangeable; both achieve h²
+convergence on the standard Poisson problem.
+
+
+## Reproducing these numbers
+
+The Galerkin numbers are produced by tests in
+`test/test_galerkin_hodge.jl`. The nonortho numbers in Table 1 and
+Table 2 are historical branch measurements from `nonorthogonal-hodge`
+with equivalent test code. The current `corrected_barycentric_hodge`
+path can differ in calibration (see the lumped-mass note above), so
+future updates should record the exact branch / commit and regenerate
+the tables from one benchmark script.
+
+
+## Update: 1-form Hodge Laplacian via mixed Galerkin
+
+`galerkin_hodge_laplacian_block(m, comp, k)` builds the saddle-point
+mixed-FEM block for the de Rham Laplacian on `k-1` forms:
+
+    [M_{k-1}              -d_{k-1}ᵀ M_k        ] [σ]   [0    ]
+    [M_k d_{k-1}           d_kᵀ M_{k+1} d_k    ] [ω] = [M_k f]
+
+For 2D 1-form Δ_H on the unit square with `ω_ex = sin(πx)sin(πy)·(dx+dy)`:
+
+| n  | err_ω    | rate |
+|----|----------|------|
+| 8  | 6.5e-3   | -    |
+| 16 | 7.8e-4   | ×8.3 |
+| 32 | 9.8e-5   | ×8.0 |
+
+→ ×8 super-convergence (h³) — matches nonortho's measured rate on the
+same problem.
+
+For 3D Kuhn 1-form Δ_H on unit cube with `ω_ex = sin(πx)sin(πy)sin(πz)·(dx+dy+dz)`:
+
+| n | err_ω | rate |
+|---|-------|------|
+| 4 | 0.038 | -     |
+| 6 | 0.011 | ×3.4  |
+| 8 | 0.005 | ×2.4  |
+
+→ ≈ h^{2.5} convergence on Kuhn 3D. (h² rate would be ×2.25, ×1.78.)
+
+So 1-form Hodge Laplacian is fully accessible via the mixed Galerkin
+formulation in both 2D and 3D simplicial meshes.
+
+
+## Polytope (hex / prism / pyramid) `k > 1` Galerkin Hodge
+
+### Hex: implemented (axis-aligned + trilinear isoparametric)
+
+`galerkin_hodge(m, tcomp::TriangulatedComplex, 2)` for hexahedral
+meshes uses the lowest-order Nédélec edge element. Axis-aligned hexes
+reduce to a 12 × 12 local mass matrix that is block-diagonal in three
+axis groups of 4, each given by tensor products of
+`∫ ν_α ν_β dy = L · (1/3 if α==β else 1/6)` on the 1D linear hat
+functions. General trilinear / sheared hexes use the same reference
+basis with covariant Piola pull-back and 2 × 2 × 2 Gauss-Legendre
+quadrature.
+
+Hex unit-cube Poisson SOLVE on a `n³` mesh:
+
+| n  | err   | rate  |
+|----|-------|-------|
+| 4  | 0.029 | -     |
+| 6  | 0.013 | ×2.26 |
+| 8  | 0.007 | ×1.83 |
+| 12 | 0.003 | ×2.35 |
+
+→ Clean h² convergence (×4 expected for h-halving, ×2.25 / ×1.78
+expected at n=4→6 / 6→8 — observed ×2.26 / ×1.83). Smaller absolute
+error than the Kuhn-tet Galerkin solve at matched `n` (1 hex per cube
+vs 6 Kuhn tets per cube), since the Nédélec basis on a hex is
+naturally aligned with the cube faces.
+
+### Prism: implemented (axis-aligned + oblique isoparametric)
+
+`galerkin_hodge(m, tcomp, 2)` for a prism mesh uses the lowest-order
+wedge Nédélec element (9 edges = 3 bottom + 3 top + 3 vertical) with
+3-pt sub-triangle × Gauss-Lobatto quadrature on the reference prism.
+Both axis-aligned and general (oblique) prisms achieve clean h²
+Poisson convergence.
+
+### Pyramid: Bedrosian Type-II 10-edge basis with Schur condensation
+
+The lowest-order pyramidal Nédélec basis (Bedrosian 1992 /
+Gradinaru-Hiptmair 1999) is genuinely research-grade because of the
+apex singularity. We implement the GH/Wachspress shape functions and
+the **10-edge Whitney basis** (8 polytope edges + 2 base-diagonal
+"bubble" Whitney forms), verified by tests in `test_galerkin_hodge.jl`:
+
+1. **Kronecker δ**: `∫_{e_β} φ_α · t̂ ds = δ_{αβ}` on the 8 reference
+   polytope edges.
+2. **Face conformity**: tangential trace on a shared base face agrees
+   across the two adjacent pyramids (covariant Piola `J^{-T}` exactly
+   compensates the (ξ,η)→(x,y) permutation that differs between them).
+3. **De Rham**: in the 10-edge graph (with both base diagonals (1,3)
+   and (2,4) as bubble edges), `∇N_a = Σ_{α∋a} ε_{α,a} φ_α` exactly for
+   all 5 nodal vertices.
+
+The two diagonal "bubble" DOFs are local to each pyramid (not shared
+between pyramids). For API uniformity with the 8-polytope-edge global
+edge count, the bubbles are **Schur-condensed locally**:
+
+    M_eff = M_PP − M_PD M_DD^{-1} M_DP                  (8×8 SPD)
+
+`galerkin_hodge(m, tcomp, 2)` returns this `M_eff` for pyramid meshes —
+a valid SPD ★_2 inner product on the polytope edge space, suitable for
+Hodge Laplacian / Whitney-form-based applications. The implementation
+is robust to both base orientations (CCW-from-below and CCW-from-above);
+input vertex order is canonicalized internally.
+
+⚠ **Stiffness caveat**: `K = d_polytope^T M_eff d_polytope` does NOT
+equal the FEM stiffness — the Schur condensation drops bubble couplings
+that contribute to the full GH-Wachspress K. For Poisson stiffness,
+`galerkin_stiffness(m, tcomp)` is special-cased on pyramid meshes to
+bypass M_1 entirely and assemble K directly via per-sub-tet
+`⟨∇λ_i, ∇λ_j⟩` (sub-tet P1 FEM).
+
+The mass-matrix integration uses **tensor-product Gauss-Legendre with
+Duffy substitution** `ξ = (1-ζ)ξ', η = (1-ζ)η'` to absorb the apex
+`(1-ζ)^{-k}` singularity in the GH/Wachspress basis. With 4 × 4 × 4 =
+64 quadrature points the diagonal mass entries match a Bey-refined
+sub-tet reference (4096 points) to better than 5e-5; the earlier 4-pt
+× 2 sub-tet rule had ≈ 9% relative error on the most apex-affected
+entries. The Hodge Laplacian convergence rate on pyramid meshes is
+unchanged by this improvement (still ≈ h^{1.3-1.5}, limited by the
+Schur-condensed `M_1`), but `M_1` itself and the Schur-condensed
+`M_eff` are now substantially more accurate as `★_2` operators.
+
+On the cube-center-apex pyramid lattice the sub-tet FEM stiffness path
+gives clean h² Poisson convergence:
+
+| n | err   | rate  |
+|---|-------|-------|
+| 4 | 0.077 | -     |
+| 6 | 0.035 | ×2.20 |
+| 8 | 0.020 | ×1.78 |
+
+(Expected ratios for h²: ×2.25 / ×1.78.)
+
+For mixed polytope meshes that combine pyramid with hex / prism / tet,
+Galerkin now assembles global SPD `M_1` and `M_2` operators through the
+polytope-aware dispatcher. The over-relaxed `nonorthogonal_hodge`
+remains useful when the existing diagonal `★d★d` DEC pipeline is the
+main requirement.
+
+### Non-axis-aligned hex: implemented for trilinear maps
+
+The current hex implementation uses a trilinear isoparametric mapping
+with 2 × 2 × 2 quadrature. The test suite verifies clean h² Poisson
+convergence on sheared hex lattices. More distorted / curved hexahedra
+would need higher quadrature and mesh-quality checks, but affine and
+trilinear shears no longer require a separate implementation path.
+
+### Polytope `k=3` (face / 2-form) mass
+
+`galerkin_hodge(m, tcomp::TriangulatedComplex, 3)` is implemented for
+all four polytope types. Three different constructions:
+
+- **Tet** — existing simplicial Whitney 2-form (`_local_mass_2form`).
+- **Hex** — lowest-order Raviart-Thomas (RT_0) on the reference cube
+  with isoparametric **contravariant** Piola pull-back
+  `ψ^p = J ψ^r / det J`. 6 face DOFs; mass evaluated by 2 × 2 × 2
+  Gauss-Legendre quadrature. On the unit cube the local mass is
+  block-diagonal in three axis groups, each block `[[1/3, -1/6], [-1/6, 1/3]]`.
+- **Prism** — true wedge RT_0 face basis on the reference prism (bottom
+  triangle (0,0)-(1,0)-(0,1) × axial [0,1]):
+    ψ_bot = (0, 0, -2(1-ζ)),    ψ_top = (0, 0, 2ζ)
+    ψ_F_3 = (ξ, η-1, 0),        ψ_F_4 = (ξ, η, 0),    ψ_F_5 = (ξ-1, η, 0)
+  with isoparametric contravariant Piola; mass via 3-pt triangle Gauss
+  × 2-pt z-Gauss = 6 quad points. 5 face DOFs.
+- **Pyramid** — direct lowest-order Hdiv basis on the corner-apex
+  reference pyramid, analogous to the prism wedge but with apex-singular
+  rational terms in the lateral basis functions:
+    ψ_F_1 (base, n̂=+ẑ from cyclic):       (-ξ, -η, 1-ζ)        polynomial
+    ψ_F_2 (lateral 1-2-5, n̂=+x̂):           (2 - 2ξ/(1-ζ), 0, 0)
+    ψ_F_3 (lateral 2-3-5, n̂=(0,-1,-1)/√2): (0, -2η/(1-ζ), 0)
+    ψ_F_4 (lateral 3-4-5, n̂=(-1,0,-1)/√2): (-2ξ/(1-ζ), 0, 0)
+    ψ_F_5 (lateral 4-1-5, n̂=+ŷ):           (0, 2 - 2η/(1-ζ), 0)
+  Kronecker δ analytically verified. The 1/(1-ζ) singularity is bounded
+  inside the pyramid (since ξ, η ≤ 1-ζ), and absorbed by the Duffy
+  substitution `ξ = (1-ζ)ξ'`, `η = (1-ζ)η'` with the (1-ζ)² Jacobian
+  during 4×4×4 Gauss-Legendre quadrature. The implementation is robust
+  to both base orientations via the same v_2↔v_4 swap as the 1-form
+  mass; the corresponding face permutation is applied to the output.
+  5 face DOFs.
+
+Sign convention for global assembly is uniform across all polytope
+types: triangle faces use permutation parity vs the global face cell's
+stored vertex order; quad faces use cyclic equivalence (+1 if some
+cyclic shift matches, −1 if the reversed cycle matches). Verified by
+the equivalence test (`galerkin_hodge: TriangulatedComplex method
+matches CellComplex on simplicial`) for k=3 on tet meshes — polytope
+dispatcher gives identical M_2 to the simplicial Whitney path.
+
+For mixed `hex + prism + pyramid` meshes the assembler now produces a
+global SPD M_2 of size `(n_faces × n_faces)`, enabling 1-form Hodge
+Laplacian and other `★_2`-based formulations on polytope meshes.
+
+### `galerkin_hodge_laplacian_block` on polytope meshes
+
+`galerkin_hodge_laplacian_block(m, tcomp::TriangulatedComplex, k)` is a
+new overload that wires the polytope-aware mass matrices into the
+saddle-point mixed-FEM block matrix for the Hodge Laplacian on `k-1`
+forms. Convergence on the unit cube with
+`ω_ex = sin(πx)sin(πy)sin(πz) (dx + dy + dz)`:
+
+| Mesh                    | n=4    | n=8    | rate       |
+|-------------------------|--------|--------|------------|
+| Hex (RT_0)              | 0.015  | 0.002  | ≈ h^{2.5}  |
+| Prism (true RT_0)       | 0.022  | 0.003  | ≈ h^{2.5}  |
+| Pyramid (true Hdiv RT_0) | 0.015  | 0.007  | ≈ h^{1.3}  |
+
+Hex and prism achieve super-convergence via direct lowest-order
+RT_0/Nédélec face bases. Pyramid M_2 is also implemented as a true
+Hdiv basis with apex-singular rational terms (Kronecker δ verified;
+SPD), but the Hodge Laplacian convergence rate on pyramid meshes is
+unchanged from the sub-tet-projection alternative — the bottleneck is
+the **Schur-condensed M_1** (Bedrosian Type-II construction), not the
+M_2. Improving pyramid Hodge Laplacian convergence to h² requires a
+compatible enriched de Rham pair: bubble/enriched 1-form DOFs, matching
+2-form DOFs, and a corresponding `d_1` that does not leave the added
+edge DOFs in the discrete curl kernel.
+
+#### Why local bubble DOFs (Schur) don't fix the mixed block
+
+A natural-looking improvement is to add the internal sub-tet faces as
+per-polytope **bubble DOFs** (each shared between 2 sub-tets within
+the polytope), then Schur-condense them locally to keep the global
+DOF count = polytope-face count. This gives an "energy-optimal
+marginal" M_eff:
+
+    M_eff = M_FF − M_FB M_BB^{-1} M_BF.
+
+Empirically, this DEGRADES the Hodge Laplacian convergence on prism
+meshes (rate drops from ≈1.7 to ≈1.4 between n=4 and n=8). Reason: the
+Schur-marginal mass is the energy-OPTIMAL extension of polytope-face
+coefficients into the full sub-tet FE space, which minimizes the L²
+norm of the bubble component — but that's a WORSE L² inner product on
+the polytope-face subspace than the partition-of-unity extension
+(bubbles ≡ 0). The current code therefore uses partition-of-unity (T
+= 0 on internal faces), and the bubble-DOF experiment is documented
+in the commit history but not used.
+
+For pyramids, a related experiment keeps the two base-diagonal
+Bedrosian bubble edges as independent global edge DOFs. That is also
+insufficient by itself: with the current lowest-order RT_0 face space,
+the curl of the bubble 1-form has zero projected face flux, so the
+new edge DOFs are effectively unconstrained in the mixed Hodge
+Laplacian block. Truly improving pyramid convergence therefore needs a
+compatible enriched 1-form / 2-form pair rather than only changing the
+local Schur condensation.
+
+
+## Diagrams
+
+ASCII diagrams for the trickier polytope constructions, intended for
+implementers planning to extend or modify the polytope FE family.
+
+### Pyramid sub-tet decomposition (canonical reference frame)
+
+The corner-apex reference pyramid has vertices
+
+    v_1 = (0, 0, 0)        v_4 = (1, 0, 0)
+    v_2 = (0, 1, 0)        v_5 = (0, 0, 1)   <-- apex
+    v_3 = (1, 1, 0)
+
+and is decomposed into 2 sub-tetrahedra by the base diagonal v_1↔v_3:
+
+         v_5 (apex)
+          /|\
+         / | \
+        /  |  \
+       /   |   \
+      / sub-tet \                _PYRAMID_TETS = ((1,2,3,5), (1,3,4,5))
+     /  τ_1 |τ_2 \
+    v_2----v_3----v_4
+     \    / \    /
+      \  /   \  /                base diagonal v_1↔v_3 (chosen) — INTERNAL
+       v_1----v_3                splits the base square into 2 triangles
+
+    base square (1,4,3,2)        the "other" diagonal v_2↔v_4 — UNUSED
+
+Bedrosian Type-II uses BOTH diagonals as bubble DOFs (10-edge basis = 8
+polytope edges + 2 base-diagonal bubbles). Both diagonals are needed for
+de Rham closure: ∇N_2 expansion has residual `φ_{24}^raw`, ∇N_4 has
+`φ_{24}^raw` too — one diagonal alone closes only vertices 1, 3, 5.
+
+### Two adjacent pyramids sharing a base face — the (ξ,η)→(x,y) swap
+
+Two pyramid clusters in a 2-cube stack share their base faces. Pyramid
+A sits below (apex pointing up), pyramid B sits above (apex pointing
+down). The shared base face has 4 vertices but their LOCAL labelings
+in pyr A vs pyr B are different cyclic orderings:
+
+         pyramid A                         pyramid B
+       (apex above)                      (apex below)
+                                                                .
+       v_5_A (above)                          .
+         \                                   .
+          \                              .
+           v_3_A=v_3_B                  base face (shared)
+          /|                              /|
+         / |  η_A axis                  / |  ξ_B axis
+        /  |                           /  |
+       /   |                          /   |
+   v_2_A   v_4_A                   v_4_B   v_2_B
+       \   |                          \   |
+        \  |                           \  |
+         \ |  ξ_A axis                  \ |  η_B axis
+          \|                              \|
+           v_1_A=v_1_B
+                                              .
+                                                v_5_B (below)
+
+  pyr A base map: χ_A(ξ, η, 0) = (ξ, η, 0)        # identity
+  pyr B base map: χ_B(ξ, η, 0) = (η, ξ, 0)        # SWAP ξ ↔ η
+
+The SAME physical edge from (0,0,0) to (0,1,0) is local edge (1,2) in
+pyr A and local edge (1,4) in pyr B (different local indices!). The
+covariant Piola pull-back J^{-T} on the basis function exactly
+compensates this swap so both pyramids give identical tangential traces
+on the shared face — verified numerically (max diff = 0 to machine
+precision); test `GH pyramid Whitney basis: face conformity on shared
+base face`. This is why no special "matching" code is needed for
+adjacent pyramids: the FE space is conformant via this Piola identity.
+
+### RT_0 face basis directions (lowest-order Hdiv)
+
+For each face F of a polytope, ψ_F is a vector field with constant
+unit flux through F and zero flux through all other faces.
+
+Hex (6 faces, axis-aligned reference cube):
+
+      face_z+ ψ = (0, 0, ζ)                top face, n=+ẑ
+                ↑↑↑↑
+       ┌────────┐
+      /│       /│
+     / │ ←x⁻ ψ=(ξ−1,0,0)
+    ┌──┴─────┐  │
+    │  │     │  │     y+ ψ=(0, η, 0) →
+    │  └─────│──┘
+    │ /      │ /  ← face_x+ ψ=(ξ, 0, 0)
+    │/       │/
+    └────────┘
+      ↓↓↓↓
+   face_z− ψ = (0, 0, ζ−1)              bottom face, n=−ẑ
+
+Each ψ has only ONE non-zero component (axis-aligned with its face's
+normal); the 6×6 mass on the unit cube is block-diagonal in 3 axis
+groups, each block `[[1/3, -1/6], [-1/6, 1/3]]`.
+
+Prism (5 faces):
+
+       v_4─────v_5     ψ_top  = (0, 0, 2ζ)            top
+      /│       │
+     / │       │       ψ_F_3  = (ξ, η-1, 0)           side opposite v_3
+    /  │   v_6 │
+   v_1─│───v_2 │       ψ_F_4  = (ξ, η, 0)             side opposite v_1
+       │       │
+       │   v_3 │       ψ_F_5  = (ξ-1, η, 0)           side opposite v_2
+       │  /
+       │ /                                  ψ_bot  = (0, 0, -2(1-ζ))
+       │/                                          bottom (n=-ẑ)
+       └
+
+Side basis functions are 2D triangle RT_0 extended trivially in axial
+direction. Bottom/top are constant-axial (no in-plane component).
+
+Pyramid (5 faces, corner-apex):
+
+           v_5 (apex)            ψ_F_1 (base, n=+ẑ from cyclic):
+            /\                       (-ξ, -η, 1-ζ)        polynomial
+           /  \                  ψ_F_2 (lateral 1-2-5):
+          /    \                     (2 - 2ξ/(1-ζ), 0, 0)
+         / lateral
+        /  faces  \               ψ_F_3 (lateral 2-3-5):
+       /  contain   \                 (0, -2η/(1-ζ), 0)
+      /  apex (1/(1-ζ)\
+     / singularity)    \         ψ_F_4 (lateral 3-4-5):
+    v_2────────────v_3                (-2ξ/(1-ζ), 0, 0)
+     │ \           / │
+     │  \         /  │           ψ_F_5 (lateral 4-1-5):
+     │   v_1────v_4  │               (0, 2 - 2η/(1-ζ), 0)
+     │  base (n=-ẑ outward)│
+     └──────────────┘
+
+Lateral basis functions have a 1/(1-ζ) singularity at the apex (z=ζ=1)
+but are bounded inside the pyramid since ξ, η ≤ 1-ζ. The Duffy
+substitution `ξ = (1-ζ)ξ'`, `η = (1-ζ)η'` with the (1-ζ)² Jacobian
+absorbs the singularity for quadrature.
+
+### Mixed-mesh layout (hex + pyramid stack)
+
+The h² Poisson convergence test uses a layered mixed mesh: lower half
+hex, upper half pyramid clusters (6 pyramids per cube meeting at the
+cube center). Shared face at z=0.5:
+
+        z=1   ┌───┬───┐
+              │ ▲ │ ▲ │     6 pyramids per cube at top half
+              │/│\│/│\│     (each pyramid base on a cube face,
+        z=0.5 ├─┼─┼─┼─┤      apex at cube center)
+              │   │   │
+              │   │   │     plain hexahedra at bottom half
+              │   │   │
+        z=0   └───┴───┘
+
+      → shared face at z=0.5 = hex's top face (a square) = pyramid's
+        base face (also a square, with vertex layout convention
+        canonicalized). Conformity holds via covariant Piola on
+        the pyramid side; hex Nédélec face basis is RT_0 by
+        construction. The dispatcher (`_polytope_1form_local_mass`,
+        `_polytope_2form_local_mass`) handles cell-by-cell type
+        switching uniformly.

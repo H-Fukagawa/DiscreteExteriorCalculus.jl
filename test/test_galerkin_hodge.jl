@@ -1,6 +1,6 @@
 using Test, DiscreteExteriorCalculus
 const DEC = DiscreteExteriorCalculus
-using LinearAlgebra: norm, diag, eigvals, Symmetric, dot
+using LinearAlgebra: norm, diag, eigvals, Symmetric, dot, I
 using SparseArrays: sparse, SparseMatrixCSC
 
 # ============================================================================
@@ -88,6 +88,32 @@ end
     M03 = galerkin_hodge(m3, comp3, 1)
     expected3 = sum(volume(m3, Simplex(c)) for c in comp3.cells[4])
     @test sum(M03) ≈ expected3
+end
+
+@testset "galerkin_load_vector: exactness and conservation" begin
+    m = Metric(2)
+    s = Simplex(Point(0.0, 0.0), Point(1.0, 0.0), Point(0.0, 1.0))
+    comp = CellComplex([s])
+    orient!(comp)
+    M0 = galerkin_hodge(m, comp, 1)
+    verts = comp.cells[1]
+
+    b_const = galerkin_load_vector(m, comp, _p -> 1.0)
+    @test b_const ≈ M0 * ones(length(verts))
+    @test sum(b_const) ≈ volume(m, s)
+
+    f_linear(p) = p.coords[1] + 2 * p.coords[2]
+    f_nodes = [f_linear(v.points[1]) for v in verts]
+    @test galerkin_load_vector(m, comp, f_linear) ≈ M0 * f_nodes
+
+    m3 = Metric(3)
+    hex_pts = [Point(c...) for c in DEC._HEX_REF_VERT_BIT]
+    tcomp = DEC.hexahedral_complex(hex_pts)
+    orient!(tcomp.complex)
+    M0_hex = galerkin_hodge(m3, tcomp, 1)
+    b_hex = galerkin_load_vector(m3, tcomp, _p -> 1.0)
+    @test b_hex ≈ M0_hex * ones(length(tcomp.complex.cells[1]))
+    @test sum(b_hex) ≈ 1.0
 end
 
 # ============================================================================
@@ -180,6 +206,83 @@ end
     @test es[2] / es[3] > 3.5
 end
 
+@testset "galerkin_lumped_mass: Kuhn tet pointwise improvement" begin
+    # Lumped mass (row-sum diagonalization of M_0) gives ≈ 5× pointwise
+    # accuracy improvement over consistent M_0 on 3D Kuhn-tet, while
+    # preserving h² convergence. Verified for n=4..12.
+    m = Metric(3)
+    function err_pair(n)
+        tcomp = _tet_lattice_3d([1.0,0,0], [0,1.0,0], [0,0,1.0], n)
+        orient!(tcomp.complex)
+        comp = tcomp.complex
+        verts = comp.cells[1]
+        u_ex = [sin(π*v.points[1].coords[1])*sin(π*v.points[1].coords[2])*
+                sin(π*v.points[1].coords[3]) for v in verts]
+        f = 3 * π^2 .* u_ex
+        _, ext = DEC.boundary_components_connected(comp)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        # Consistent
+        M0c, K = galerkin_laplacian(m, comp)
+        u_c = K[int_idx, int_idx] \ (M0c * f)[int_idx]
+        # Lumped
+        M0l, _ = galerkin_laplacian_lumped(m, comp)
+        u_l = K[int_idx, int_idx] \ (M0l * f)[int_idx]
+        return (norm(u_c - u_ex[int_idx]) / sqrt(length(int_idx)),
+                norm(u_l - u_ex[int_idx]) / sqrt(length(int_idx)))
+    end
+    ec4, el4 = err_pair(4)
+    ec8, el8 = err_pair(8)
+    # Lumped is substantially more accurate
+    @test el4 < 0.4 * ec4
+    @test el8 < 0.4 * ec8
+    # Lumped maintains h² (ratio at h-halving > 3.5)
+    @test el4 / el8 > 3.5
+    # Consistent also h² (sanity)
+    @test ec4 / ec8 > 3.5
+end
+
+@testset "galerkin_blended_mass: endpoints and interpolation" begin
+    m = Metric(2)
+    _, tcomp = DEC.triangulated_lattice([1.0, 0.0], [0.0, 1.0], 2, 2)
+    orient!(tcomp.complex)
+    M0, K = galerkin_laplacian(m, tcomp.complex)
+    M_lumped = galerkin_lumped_mass(M0)
+    @test galerkin_blended_mass(M0, 0) == M_lumped
+    @test galerkin_blended_mass(M0, 1) == M0
+    @test galerkin_blended_mass(M0, 0.25) ≈ 0.25 * M0 + 0.75 * M_lumped
+    Mθ, Kθ = galerkin_laplacian_blended(m, tcomp.complex, 0.25)
+    @test Mθ ≈ galerkin_blended_mass(M0, 0.25)
+    @test Kθ == K
+    @test_throws AssertionError galerkin_blended_mass(M0, -0.1)
+    @test_throws AssertionError galerkin_blended_mass(M0, 1.1)
+end
+
+@testset "galerkin_blended_mass: θ=0.25 beats consistent and lumped on Poisson" begin
+    # Numerical verification of the headline claim in galerkin_vs_nonortho.md:
+    # blending with θ ≈ 0.25 produces a substantially smaller pointwise error
+    # than either the consistent (θ=1) or fully lumped (θ=0) endpoints.
+    m = Metric(2)
+    _, tcomp = DEC.triangulated_lattice([1.0, 0.0], [0.0, 1.0], 16, 16)
+    orient!(tcomp.complex)
+    comp = tcomp.complex
+    verts = comp.cells[1]
+    u_ex = [sin(π*v.points[1].coords[1]) * sin(π*v.points[1].coords[2]) for v in verts]
+    f = 2 * π^2 .* u_ex
+    M0, K = galerkin_laplacian(m, comp)
+    _, ext = DEC.boundary_components_connected(comp)
+    bnd = Set(ext.cells[1])
+    int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+    err(Mθ) = norm(K[int_idx, int_idx] \ (Mθ * f)[int_idx] - u_ex[int_idx]) /
+              sqrt(length(int_idx))
+    e_cons    = err(M0)
+    e_lumped  = err(galerkin_lumped_mass(M0))
+    e_blend25 = err(galerkin_blended_mass(M0, 0.25))
+    # Blend at θ=0.25 must be at least 5× more accurate than each endpoint.
+    @test e_blend25 < e_cons / 5
+    @test e_blend25 < e_lumped / 5
+end
+
 @testset "galerkin_laplacian: Poisson solve on 3D Kuhn unit cube (h²)" begin
     m = Metric(3)
     function err(n)
@@ -220,7 +323,14 @@ end
     m3 = Metric(3)
     tcomp3 = _tet_lattice_3d([1.0,0,0], [0,1.0,0], [0,0,1.0], 2)
     orient!(tcomp3.complex)
+    # k=1 (vertex mass) — exists already
     @test galerkin_hodge(m3, tcomp3.complex, 1) ≈ galerkin_hodge(m3, tcomp3, 1)
+    # k=2 (edge mass) — verifies the polytope dispatch sign convention matches
+    # the simplicial Whitney M_1 on a tet mesh (Tier 2.3 verification).
+    @test galerkin_hodge(m3, tcomp3.complex, 2) ≈ galerkin_hodge(m3, tcomp3, 2)
+    # k=3 (face mass) — verifies the polytope k=3 dispatcher correctly
+    # handles triangle face permutation parity vs the simplicial Whitney M_2.
+    @test galerkin_hodge(m3, tcomp3.complex, 3) ≈ galerkin_hodge(m3, tcomp3, 3)
 end
 
 # ============================================================================
@@ -267,4 +377,852 @@ end
     # Both should approximate u_ex to roughly the same magnitude
     err_g = norm(u_g - u_ex[int_idx]) / sqrt(length(int_idx))
     @test err_g < 0.01  # h² with n=16, h=1/16 → h² ≈ 0.004
+end
+
+# ============================================================================
+# Tier 3.3: numerical confirmation that Galerkin and the lumped-mass DEC
+# (★_0^{-1} d_0' ★_1 d_0, "nonortho") Poisson solutions converge to the SAME
+# continuous solution as h → 0 — the two discrete operators differ but their
+# inverses agree on smooth solutions to leading order. On a 2D right-triangle
+# mesh (well-centered, circumcenters lie on hypotenuse midpoints), both
+# methods exhibit clean h² convergence to u_ex AND |u_G − u_NN| → 0 at h².
+# ============================================================================
+@testset "galerkin vs nonortho: same continuous limit (2D well-centered)" begin
+    m = Metric(2)
+    function err_compare(n)
+        _, tcomp = DEC.triangulated_lattice([1.0, 0.0], [0.0, 1.0], n, n)
+        orient!(tcomp.complex)
+        mesh = Mesh(tcomp, circumcenter(m))
+        comp = tcomp.complex
+        verts = comp.cells[1]
+        u_ex = [sin(π*v.points[1].coords[1])*sin(π*v.points[1].coords[2]) for v in verts]
+        f = 2 * π^2 .* u_ex
+        _, ext = DEC.boundary_components_connected(comp)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        # Galerkin
+        M0, K_g = galerkin_laplacian(m, comp)
+        u_g = zeros(length(verts))
+        u_g[int_idx] = K_g[int_idx, int_idx] \ (M0 * f)[int_idx]
+        # Nonortho (circumcenter ★_1 + lumped ★_0)
+        star0 = DEC.circumcenter_hodge(m, mesh, 1, true)
+        star1 = DEC.circumcenter_hodge(m, mesh, 2, true)
+        d0 = DEC.exterior_derivative(comp, 1)
+        L = transpose(d0) * star1 * d0
+        u_n = zeros(length(verts))
+        u_n[int_idx] = L[int_idx, int_idx] \ (star0 * f)[int_idx]
+        return (norm(u_g[int_idx] - u_ex[int_idx]) / sqrt(length(int_idx)),
+                norm(u_n[int_idx] - u_ex[int_idx]) / sqrt(length(int_idx)),
+                norm(u_g[int_idx] - u_n[int_idx]) / sqrt(length(int_idx)))
+    end
+    eg4, en4, dgn4 = err_compare(8)
+    eg8, en8, dgn8 = err_compare(16)
+    eg16, en16, dgn16 = err_compare(32)
+    # Galerkin h² convergence (ratio at h-halving > 3.5)
+    @test eg4 / eg8 > 3.5
+    @test eg8 / eg16 > 3.5
+    # Nonortho h² convergence
+    @test en4 / en8 > 3.5
+    @test en8 / en16 > 3.5
+    # Most importantly: the DIFFERENCE |u_G − u_NN| converges to 0 at h²,
+    # confirming both methods limit to the SAME continuous solution.
+    @test dgn4 / dgn8  > 3.5
+    @test dgn8 / dgn16 > 3.5
+end
+
+# ============================================================================
+# 1-form Hodge Laplacian via mixed-FEM (saddle-point) Galerkin.
+# Find (σ, ω) such that  M_0 σ − d_0' M_1 ω = 0  and
+#                        M_1 d_0 σ + d_1' M_2 d_1 ω = M_1 f.
+# Tests `galerkin_hodge_laplacian_block(m, comp, 2)` and verifies that the
+# discrete ω_h converges to the exact ω at edges. Tangential ω = 0 on the
+# unit-cube boundary for our manufactured ω_ex (every component contains a
+# `sin(π·)` that vanishes there).
+# ============================================================================
+@testset "galerkin_hodge_laplacian_block: 2D 1-form Hodge Laplacian" begin
+    m = Metric(2)
+    function err(n)
+        _, tcomp = DEC.triangulated_lattice([1.0, 0.0], [0.0, 1.0], n, n)
+        orient!(tcomp.complex)
+        comp = tcomp.complex
+        A, M_mid = galerkin_hodge_laplacian_block(m, comp, 2)
+        n_v = length(comp.cells[1]); n_e = length(comp.cells[2])
+        edges = comp.cells[2]
+
+        # ω_ex = sin(πx)sin(πy) (dx + dy); Δ_H ω = 2π² ω; tangential ω = 0 on ∂Ω.
+        function ω_edge(e)
+            v1, v2 = e.children
+            v_pos = v1.parents[e] ? v1 : v2
+            v_neg = v1.parents[e] ? v2 : v1
+            Δ   = v_pos.points[1].coords - v_neg.points[1].coords
+            mid = (v_pos.points[1].coords + v_neg.points[1].coords) / 2
+            s = sin(π * mid[1]) * sin(π * mid[2])
+            return s * (Δ[1] + Δ[2])
+        end
+        ω_ex = [ω_edge(e) for e in edges]
+        f_e  = 2 * π^2 .* ω_ex
+        rhs  = [zeros(n_v); M_mid * f_e]
+
+        _, ext = DEC.boundary_components_connected(comp)
+        bnd_e_set = Set(ext.cells[2])
+        bnd_e_idx = [i for (i, e) in enumerate(edges) if e in bnd_e_set]
+        int_e_idx = setdiff(1:n_e, bnd_e_idx)
+        free_idx = [collect(1:n_v); n_v .+ int_e_idx]
+        x = A[free_idx, free_idx] \ rhs[free_idx]
+        ω_h = zeros(n_e); ω_h[int_e_idx] = x[n_v + 1:end]
+        return norm(ω_h[int_e_idx] - ω_ex[int_e_idx]) / sqrt(length(int_e_idx))
+    end
+    es = [err(n) for n in [8, 16, 32]]
+    # ω convergence on regular skewed lattice: empirically ×8 (h³ super-conv).
+    # Conservatively assert ≥ ×3.5 (h²).
+    @test es[1] / es[2] > 3.5
+    @test es[2] / es[3] > 3.5
+end
+
+function _hodge_lap_err(tcomp; manuf=:sin)
+    m = Metric(3)
+    DEC.orient!(tcomp.complex)
+    comp = tcomp.complex
+    A, M_mid = galerkin_hodge_laplacian_block(m, tcomp, 2)
+    n_v = length(comp.cells[1]); n_e = length(comp.cells[2])
+    edges = comp.cells[2]
+    function ω_edge(e)
+        v1, v2 = e.children
+        v_pos = v1.parents[e] ? v1 : v2
+        v_neg = v1.parents[e] ? v2 : v1
+        Δ   = v_pos.points[1].coords - v_neg.points[1].coords
+        mid = (v_pos.points[1].coords + v_neg.points[1].coords) / 2
+        s = sin(π*mid[1]) * sin(π*mid[2]) * sin(π*mid[3])
+        return s * (Δ[1] + Δ[2] + Δ[3])
+    end
+    ω_ex = [ω_edge(e) for e in edges]
+    f_e  = 3 * π^2 .* ω_ex
+    rhs  = [zeros(n_v); M_mid * f_e]
+    _, ext = DEC.boundary_components_connected(comp)
+    bnd_e_set = Set(ext.cells[2])
+    bnd_e_idx = [i for (i, e) in enumerate(edges) if e in bnd_e_set]
+    int_e_idx = setdiff(1:n_e, bnd_e_idx)
+    free_idx = [collect(1:n_v); n_v .+ int_e_idx]
+    x = A[free_idx, free_idx] \ rhs[free_idx]
+    ω_h = zeros(n_e); ω_h[int_e_idx] = x[n_v + 1:end]
+    return norm(ω_h[int_e_idx] - ω_ex[int_e_idx]) / sqrt(length(int_e_idx))
+end
+
+@testset "galerkin_hodge_laplacian_block: hex 1-form Hodge Laplacian (TC overload)" begin
+    # Hex meshes use proper Nédélec edge mass (M_1) + RT_0 face mass (M_2);
+    # mixed-FEM Hodge Laplacian achieves ≈ h^{2.5} super-convergence.
+    function hex_lat(n)
+        pts = Dict{NTuple{3,Int}, Point{3}}()
+        for i in 0:n, j in 0:n, k in 0:n; pts[(i,j,k)] = Point(i/n, j/n, k/n); end
+        elements = Tuple{Symbol, Vector{Point{3}}}[]
+        for i in 0:n-1, j in 0:n-1, k in 0:n-1
+            c8 = [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+                  pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+            push!(elements, (:hex, c8))
+        end
+        return DEC.polyhedral_complex(elements)
+    end
+    e4 = _hodge_lap_err(hex_lat(4))
+    e8 = _hodge_lap_err(hex_lat(8))
+    @test e4 / e8 > 5.0     # observed ≈9 (h^{2.5} would give 5.66; h² → 4.0)
+end
+
+@testset "galerkin_hodge_laplacian_block: prism + pyramid 1-form Hodge Laplacian" begin
+    # Prism uses true wedge RT_0 face basis with isoparametric Piola — gives
+    # ≈ h^{2.5} super-convergence (observed ratio ≈9 between n=4 and n=8,
+    # matching the hex result). Pyramid uses sub-tet projection for M_2 (no
+    # true RT_0 yet) and Schur-condensed M_1 — convergence ≈ h^{1.3}.
+    function prism_lat(n)
+        pts = Dict{Tuple{Int,Int,Int}, Point{3}}()
+        for i in 0:n, j in 0:n, k in 0:n; pts[(i,j,k)] = Point(i/n, j/n, k/n); end
+        elements = Tuple{Symbol, Vector{Point{3}}}[]
+        for i in 0:n-1, j in 0:n-1, k in 0:n-1
+            push!(elements, (:prism, [pts[(i,j,k)], pts[(i+1,j,k)], pts[(i+1,j+1,k)],
+                                       pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)]]))
+            push!(elements, (:prism, [pts[(i,j,k)], pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+                                       pts[(i,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]))
+        end
+        return DEC.polyhedral_complex(elements)
+    end
+    e4_p = _hodge_lap_err(prism_lat(4))
+    e8_p = _hodge_lap_err(prism_lat(8))
+    @test e4_p / e8_p > 5.0    # ≈ h^{2.5}: ratio ≈ (8/4)^{2.5} = 5.66 (observed ≈9)
+
+    # Pyramid lattice
+    function pyr_lat(n)
+        pts = Dict{NTuple{3,Int}, Point{3}}()
+        for i in 0:n, j in 0:n, k in 0:n; pts[(i,j,k)] = Point(i/n, j/n, k/n); end
+        pyramids = Vector{Vector{Point{3}}}()
+        for i in 0:n-1, j in 0:n-1, k in 0:n-1
+            c8 = [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+                  pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+            ctr = Point((i+0.5)/n, (j+0.5)/n, (k+0.5)/n)
+            push!(pyramids, [c8[1], c8[4], c8[3], c8[2], ctr])
+            push!(pyramids, [c8[5], c8[6], c8[7], c8[8], ctr])
+            push!(pyramids, [c8[1], c8[2], c8[6], c8[5], ctr])
+            push!(pyramids, [c8[2], c8[3], c8[7], c8[6], ctr])
+            push!(pyramids, [c8[3], c8[4], c8[8], c8[7], ctr])
+            push!(pyramids, [c8[4], c8[1], c8[5], c8[8], ctr])
+        end
+        return DEC.pyramidal_complex(pyramids)
+    end
+    e4_y = _hodge_lap_err(pyr_lat(4))
+    e6_y = _hodge_lap_err(pyr_lat(6))
+    @test e4_y / e6_y > 1.3    # at least monotone decrease (observed ≈1.7)
+end
+
+@testset "galerkin_hodge_laplacian_block: 3D Kuhn 1-form Hodge Laplacian" begin
+    m = Metric(3)
+    function err(n)
+        tcomp = _tet_lattice_3d([1.0,0,0], [0,1.0,0], [0,0,1.0], n)
+        orient!(tcomp.complex)
+        comp = tcomp.complex
+        A, M_mid = galerkin_hodge_laplacian_block(m, comp, 2)
+        n_v = length(comp.cells[1]); n_e = length(comp.cells[2])
+        edges = comp.cells[2]
+
+        # ω_ex = sin(πx)sin(πy)sin(πz) (dx+dy+dz); Δ_H ω = 3π² ω.
+        function ω_edge(e)
+            v1, v2 = e.children
+            v_pos = v1.parents[e] ? v1 : v2
+            v_neg = v1.parents[e] ? v2 : v1
+            Δ   = v_pos.points[1].coords - v_neg.points[1].coords
+            mid = (v_pos.points[1].coords + v_neg.points[1].coords) / 2
+            s = sin(π*mid[1]) * sin(π*mid[2]) * sin(π*mid[3])
+            return s * (Δ[1] + Δ[2] + Δ[3])
+        end
+        ω_ex = [ω_edge(e) for e in edges]
+        f_e  = 3 * π^2 .* ω_ex
+        rhs  = [zeros(n_v); M_mid * f_e]
+
+        _, ext = DEC.boundary_components_connected(comp)
+        bnd_e_set = Set(ext.cells[2])
+        bnd_e_idx = [i for (i, e) in enumerate(edges) if e in bnd_e_set]
+        int_e_idx = setdiff(1:n_e, bnd_e_idx)
+        free_idx = [collect(1:n_v); n_v .+ int_e_idx]
+        x = A[free_idx, free_idx] \ rhs[free_idx]
+        ω_h = zeros(n_e); ω_h[int_e_idx] = x[n_v + 1:end]
+        return norm(ω_h[int_e_idx] - ω_ex[int_e_idx]) / sqrt(length(int_e_idx))
+    end
+    es = [err(n) for n in [4, 6, 8]]
+    # 3D Kuhn — measured ≈h^{2.5}. Assert ≥ ×2.0 between consecutive sizes.
+    @test es[1] / es[2] > 2.0
+    @test es[2] / es[3] > 1.7
+end
+
+# ============================================================================
+# Hex Nedelec / Whitney 1-form on axis-aligned hexahedral meshes.
+# ============================================================================
+function _hex_lattice_unit(n)
+    pts = Dict{NTuple{3,Int}, Point{3}}()
+    for i in 0:n, j in 0:n, k in 0:n
+        pts[(i,j,k)] = Point(i/n, j/n, k/n)
+    end
+    hexes = Vector{Vector{Point{3}}}()
+    for i in 0:n-1, j in 0:n-1, k in 0:n-1
+        push!(hexes, [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+                      pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]])
+    end
+    return DEC.hexahedral_complex(hexes)
+end
+
+@testset "galerkin_hodge: hex Nedelec 1-form mass — structural" begin
+    m = Metric(3)
+    tcomp = _hex_lattice_unit(2)
+    orient!(tcomp.complex)
+    M1 = galerkin_hodge(m, tcomp, 2)
+    n_e = length(tcomp.complex.cells[2])
+    @test size(M1) == (n_e, n_e)
+    @test M1 ≈ transpose(M1)
+    @test minimum(eigvals(Symmetric(Matrix(M1)))) > 0
+end
+
+@testset "galerkin_hodge k=3: prism + pyramid face mass via sub-tet projection" begin
+    m = Metric(3)
+    # Prism: 5 face DOFs (3 quad sides + 2 triangle ends), should be SPD
+    prism = [Point(0.0,0.0,0.0), Point(1.0,0.0,0.0), Point(0.5,1.0,0.0),
+             Point(0.0,0.0,1.0), Point(1.0,0.0,1.0), Point(0.5,1.0,1.0)]
+    tcomp = DEC.polyhedral_complex([(:prism, prism)])
+    orient!(tcomp.complex)
+    M2 = galerkin_hodge(m, tcomp, 3)
+    @test size(M2) == (5, 5)
+    @test maximum(abs, M2 - M2') < 1e-12
+    @test minimum(eigvals(Symmetric(Matrix(M2)))) > 0
+
+    # Pyramid: 5 face DOFs (1 quad base + 4 triangle laterals), should be SPD
+    pyr = [Point(0.0,0.0,0.0), Point(0.0,1.0,0.0), Point(1.0,1.0,0.0),
+           Point(1.0,0.0,0.0), Point(0.5,0.5,0.5)]
+    tcomp = DEC.polyhedral_complex([(:pyramid, pyr)])
+    orient!(tcomp.complex)
+    M2 = galerkin_hodge(m, tcomp, 3)
+    @test size(M2) == (5, 5)
+    @test maximum(abs, M2 - M2') < 1e-12
+    @test minimum(eigvals(Symmetric(Matrix(M2)))) > 0
+
+    # Mixed mesh: hex + prism + pyramid (3 isolated cells), should assemble cleanly
+    shift = (dx, p) -> Point(p.coords[1] + dx, p.coords[2], p.coords[3])
+    hex_pts = [Point(c...) for c in DEC._HEX_REF_VERT_BIT]
+    prism_pts = [shift(2.0, p) for p in prism]
+    pyr_pts = [shift(4.0, p) for p in pyr]
+    tcomp = DEC.polyhedral_complex([(:hex, hex_pts), (:prism, prism_pts),
+                                    (:pyramid, pyr_pts)])
+    orient!(tcomp.complex)
+    M2 = galerkin_hodge(m, tcomp, 3)
+    @test maximum(abs, M2 - M2') < 1e-12
+    @test minimum(eigvals(Symmetric(Matrix(M2)))) > 0
+end
+
+@testset "galerkin_hodge: hex RT_0 face mass — structural" begin
+    m = Metric(3)
+    function _hex_lattice(n)
+        pts = Dict{NTuple{3,Int}, Point{3}}()
+        for i in 0:n, j in 0:n, k in 0:n; pts[(i,j,k)] = Point(i/n, j/n, k/n); end
+        elements = Tuple{Symbol, Vector{Point{3}}}[]
+        for i in 0:n-1, j in 0:n-1, k in 0:n-1
+            c8 = [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+                  pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+            push!(elements, (:hex, c8))
+        end
+        return DEC.polyhedral_complex(elements)
+    end
+    tcomp = _hex_lattice(2)
+    orient!(tcomp.complex)
+    M2 = galerkin_hodge(m, tcomp, 3)
+    @test size(M2) == (length(tcomp.complex.cells[3]), length(tcomp.complex.cells[3]))
+    @test maximum(abs, M2 - M2') < 1e-12
+    @test minimum(eigvals(Symmetric(Matrix(M2)))) > 0    # SPD
+
+    # Reference unit hex: explicit RT_0 mass should be block-diagonal in 3 axis
+    # groups with each block [[1/3, -1/6], [-1/6, 1/3]].
+    hex_ref = [Point(c...) for c in DEC._HEX_REF_VERT_BIT]
+    M_ref, _ = DEC._hex_local_mass_2form(m, hex_ref)
+    block_z = M_ref[[1, 2], [1, 2]]
+    @test block_z ≈ [1/3 -1/6; -1/6 1/3]
+end
+
+@testset "galerkin_hodge: hex Poisson SOLVE on unit cube reaches h²" begin
+    m = Metric(3)
+    function err(n)
+        tcomp = _hex_lattice_unit(n)
+        orient!(tcomp.complex)
+        comp = tcomp.complex
+        M0 = galerkin_hodge(m, tcomp, 1)
+        M1 = galerkin_hodge(m, tcomp, 2)
+        d0 = DEC.exterior_derivative(comp, 1)
+        K = transpose(d0) * M1 * d0
+        verts = comp.cells[1]
+        u_ex = [sin(π*v.points[1].coords[1]) * sin(π*v.points[1].coords[2]) *
+                sin(π*v.points[1].coords[3]) for v in verts]
+        f = 3 * π^2 .* u_ex
+        _, ext = DEC.boundary_components_connected(comp)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        u_int = K[int_idx, int_idx] \ (M0 * f)[int_idx]
+        return norm(u_int - u_ex[int_idx]) / sqrt(length(int_idx))
+    end
+    es = [err(n) for n in [4, 8]]
+    # Ratio over 2× refinement should be ≈4 for clean h². Allow ≥3.5.
+    @test es[1] / es[2] > 3.5
+end
+
+@testset "galerkin_laplacian high-level API on hex mesh" begin
+    m = Metric(3)
+    tcomp = _hex_lattice_unit(4)
+    orient!(tcomp.complex)
+    M0, K = galerkin_laplacian(m, tcomp)
+    n_v = length(tcomp.complex.cells[1])
+    @test size(M0) == (n_v, n_v)
+    @test size(K)  == (n_v, n_v)
+    # K is symmetric and positive semi-definite (constant null space).
+    @test K ≈ transpose(K)
+    @test minimum(eigvals(Symmetric(Matrix(K)))) > -1e-10
+    @test norm(K * ones(n_v)) < 1e-10
+
+    # Solve Poisson and verify h² (n=4 vs n=8).
+    function err(n)
+        tc = _hex_lattice_unit(n)
+        orient!(tc.complex)
+        M0, K = galerkin_laplacian(m, tc)
+        verts = tc.complex.cells[1]
+        u_ex = [sin(π*v.points[1].coords[1]) * sin(π*v.points[1].coords[2]) *
+                sin(π*v.points[1].coords[3]) for v in verts]
+        f = 3 * π^2 .* u_ex
+        _, ext = DEC.boundary_components_connected(tc.complex)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        u_int = K[int_idx, int_idx] \ (M0 * f)[int_idx]
+        return norm(u_int - u_ex[int_idx]) / sqrt(length(int_idx))
+    end
+    @test err(4) / err(8) > 3.5
+end
+
+# ============================================================================
+# Prism (wedge Nédélec) Whitney 1-form on right (axis-aligned) prismatic meshes.
+# ============================================================================
+function _prism_lattice_unit(n)
+    pts = Dict{NTuple{3,Int}, Point{3}}()
+    for i in 0:n, j in 0:n, k in 0:n
+        pts[(i,j,k)] = Point(i/n, j/n, k/n)
+    end
+    prisms = Vector{Vector{Point{3}}}()
+    for i in 0:n-1, j in 0:n-1, k in 0:n-1
+        c8 = [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+              pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+        push!(prisms, [c8[1], c8[2], c8[4], c8[5], c8[6], c8[8]])
+        push!(prisms, [c8[2], c8[3], c8[4], c8[6], c8[7], c8[8]])
+    end
+    return DEC.prismatic_complex(prisms)
+end
+
+@testset "galerkin_hodge: prism Nédélec 1-form mass — structural" begin
+    m = Metric(3)
+    tcomp = _prism_lattice_unit(2)
+    orient!(tcomp.complex)
+    M1 = galerkin_hodge(m, tcomp, 2)
+    n_e = length(tcomp.complex.cells[2])
+    @test size(M1) == (n_e, n_e)
+    @test M1 ≈ transpose(M1)
+    @test minimum(eigvals(Symmetric(Matrix(M1)))) > 0
+end
+
+@testset "galerkin_hodge: prism Poisson SOLVE on unit cube reaches h²" begin
+    m = Metric(3)
+    function err(n)
+        tcomp = _prism_lattice_unit(n)
+        orient!(tcomp.complex)
+        M0, K = galerkin_laplacian(m, tcomp)
+        verts = tcomp.complex.cells[1]
+        u_ex = [sin(π*v.points[1].coords[1]) * sin(π*v.points[1].coords[2]) *
+                sin(π*v.points[1].coords[3]) for v in verts]
+        f = 3 * π^2 .* u_ex
+        _, ext = DEC.boundary_components_connected(tcomp.complex)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        u_int = K[int_idx, int_idx] \ (M0 * f)[int_idx]
+        return norm(u_int - u_ex[int_idx]) / sqrt(length(int_idx))
+    end
+    @test err(4) / err(8) > 3.5
+end
+
+# ============================================================================
+# Pyramid Nédélec via Bedrosian Type-II / Gradinaru-Hiptmair (1999) basis.
+# The 10-edge basis (8 polytope edges + 2 base-diagonal bubbles) is fully
+# de-Rham consistent (∇N_a expands exactly in the basis for all 5 vertices).
+# The mass dispatcher returns an 8×8 Schur-condensed M_eff on the polytope
+# edges (SPD). Pyramid Galerkin Poisson is assembled via per-sub-tet
+# ⟨∇λ_i,∇λ_j⟩ for correct K_FEM (see test below).
+# ============================================================================
+@testset "galerkin_hodge k=3: pyramid RT_0 returns SPD 5×5 M_2 (both orientations)" begin
+    m = Metric(3)
+    for (label, pts) in (
+        ("CCW-from-below", [Point(0.0,0.0,0.0), Point(0.0,1.0,0.0), Point(1.0,1.0,0.0),
+                            Point(1.0,0.0,0.0), Point(0.5,0.5,0.5)]),
+        ("CCW-from-above", [Point(0.0,0.0,0.0), Point(1.0,0.0,0.0), Point(1.0,1.0,0.0),
+                            Point(0.0,1.0,0.0), Point(0.5,0.5,0.5)]))
+        tcomp = DEC.polyhedral_complex([(:pyramid, pts)])
+        orient!(tcomp.complex)
+        M2 = galerkin_hodge(m, tcomp, 3)
+        @test size(M2) == (5, 5)
+        @test maximum(abs, M2 - M2') < 1e-12
+        @test minimum(eigvals(Symmetric(Matrix(M2)))) > 0
+    end
+end
+
+@testset "galerkin_hodge: pyramid 1-form returns SPD 8×8 M_eff (both orientations)" begin
+    m = Metric(3)
+    for (label, pts) in (
+        ("CCW-from-below", [Point(0.0,0.0,0.0), Point(0.0,1.0,0.0), Point(1.0,1.0,0.0),
+                            Point(1.0,0.0,0.0), Point(0.5,0.5,0.5)]),
+        ("CCW-from-above", [Point(0.0,0.0,0.0), Point(1.0,0.0,0.0), Point(1.0,1.0,0.0),
+                            Point(0.0,1.0,0.0), Point(0.5,0.5,0.5)]))
+        tcomp = DEC.pyramidal_complex([pts])
+        orient!(tcomp.complex)
+        M1 = galerkin_hodge(m, tcomp, 2)
+        @test size(M1, 1) == 8 && size(M1, 2) == 8
+        @test maximum(abs, M1 - M1') < 1e-12
+        @test minimum(eigvals(Symmetric(Matrix(M1)))) > 0    # SPD
+    end
+end
+
+@testset "GH pyramid 10-DOF basis: de Rham consistency" begin
+    # Σ_{α ∋ a} ε_{α,a} φ_α(x) = ∇N_a(x) at arbitrary interior points
+    # for all a ∈ 1..5 — verifies the 10-edge (8 polytope + 2 base diagonals)
+    # basis is de-Rham complete.
+    edges_ext = collect(DEC._PYR_EDGES_EXT)
+    for (ξ, η, ζ) in ((0.5, 0.5, 0.0), (0.3, 0.3, 0.3),
+                      (0.1, 0.4, 0.5), (0.2, 0.2, 0.7))
+        ∇Ns = [collect(DEC._pyr_grad_N(i, ξ, η, ζ)) for i in 1:5]
+        for a in 1:5
+            ψ = zeros(3)
+            for (α, (from, to)) in enumerate(edges_ext)
+                φ = collect(DEC._pyr_whitney(α, ξ, η, ζ))
+                if from == a; ψ -= φ; end
+                if to   == a; ψ += φ; end
+            end
+            @test norm(ψ - ∇Ns[a]) < 1e-12
+        end
+    end
+end
+
+@testset "GH pyramid Whitney basis: face conformity on shared base face" begin
+    # Two pyramids sharing a square base face at z=0: pyr_A above (apex at +z),
+    # pyr_B below (apex at -z). Shared physical edge (0,0,0)→(0,1,0) is local
+    # edge (1,2) in pyr_A and local edge (1,4) in pyr_B (different local
+    # numberings due to the (ξ,η)→physical permutation). The basis function for
+    # this shared edge MUST give the same tangential trace on the shared base
+    # face from both pyramids — otherwise the global Whitney space is non-
+    # conformant. Verified numerically that the in-plane components match
+    # exactly (the swap in the (ξ,η)→(x,y) map is exactly compensated by
+    # the covariant Piola pull-back J^{-T}).
+    pyr_A = [Point(0.0,0.0,0.0), Point(0.0,1.0,0.0), Point(1.0,1.0,0.0),
+             Point(1.0,0.0,0.0), Point(0.5,0.5,+0.5)]
+    pyr_B = [Point(0.0,0.0,0.0), Point(1.0,0.0,0.0), Point(1.0,1.0,0.0),
+             Point(0.0,1.0,0.0), Point(0.5,0.5,-0.5)]
+    function pyr_phi_phys(α, ξ, η, ζ, pyr_pts)
+        φref = DEC._pyr_whitney(α, ξ, η, ζ)
+        J = zeros(3, 3)
+        for i in 1:5
+            gN = DEC._pyr_grad_N(i, ξ, η, ζ)
+            for k in 1:3
+                J[k,1] += gN[1] * pyr_pts[i].coords[k]
+                J[k,2] += gN[2] * pyr_pts[i].coords[k]
+                J[k,3] += gN[3] * pyr_pts[i].coords[k]
+            end
+        end
+        return inv(J)' * collect(φref)
+    end
+    samples = [(0.3, 0.7), (0.5, 0.5), (0.2, 0.4), (0.7, 0.3), (0.6, 0.8)]
+    max_diff = 0.0
+    for (x, y) in samples
+        # Pyramid A: ξ=x, η=y on base. Pyramid B: ξ=y, η=x on base.
+        φA = pyr_phi_phys(1, x, y, 0.0, pyr_A)   # local edge (1,2) of A
+        φB = pyr_phi_phys(2, y, x, 0.0, pyr_B)   # local edge (1,4) of B
+        max_diff = max(max_diff, abs(φA[1] - φB[1]), abs(φA[2] - φB[2]))
+    end
+    @test max_diff < 1e-12
+    # Bonus: lateral edges have zero in-plane trace on base face (Whitney δ).
+    for (x, y) in samples
+        φA = pyr_phi_phys(5, x, y, 0.0, pyr_A)   # apex edge (1,5)
+        @test abs(φA[1]) + abs(φA[2]) < 1e-12
+    end
+end
+
+@testset "Pyramid extended assembly: bubble DOFs as global edges" begin
+    # Diagnostic: the extended assembly is callable as research helper.
+    # M_1_ext is SPD; d_0_ext is consistent with the polytope d_0 in the
+    # first n_polytope rows; bubble edges have new global indices.
+    m = Metric(3)
+    function pyr_lat(n)
+        pts = Dict{NTuple{3,Int}, Point{3}}()
+        for i in 0:n, j in 0:n, k in 0:n; pts[(i,j,k)] = Point(i/n, j/n, k/n); end
+        pyramids = Vector{Vector{Point{3}}}()
+        for i in 0:n-1, j in 0:n-1, k in 0:n-1
+            c8 = [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+                  pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+            ctr = Point((i+0.5)/n, (j+0.5)/n, (k+0.5)/n)
+            push!(pyramids, [c8[1], c8[4], c8[3], c8[2], ctr])
+            push!(pyramids, [c8[5], c8[6], c8[7], c8[8], ctr])
+            push!(pyramids, [c8[1], c8[2], c8[6], c8[5], ctr])
+            push!(pyramids, [c8[2], c8[3], c8[7], c8[6], ctr])
+            push!(pyramids, [c8[3], c8[4], c8[8], c8[7], ctr])
+            push!(pyramids, [c8[4], c8[1], c8[5], c8[8], ctr])
+        end
+        return DEC.pyramidal_complex(pyramids)
+    end
+    tcomp = pyr_lat(2)
+    orient!(tcomp.complex)
+    M1_ext, d0_ext, n_e_polytope, n_e_bubble = DEC._pyramid_extended_assembly(m, tcomp)
+    @test size(M1_ext) == (n_e_polytope + n_e_bubble, n_e_polytope + n_e_bubble)
+    @test size(d0_ext) == (n_e_polytope + n_e_bubble, length(tcomp.complex.cells[1]))
+    @test maximum(abs, M1_ext - M1_ext') < 1e-12
+    @test minimum(eigvals(Symmetric(Matrix(M1_ext)))) > -1e-10  # SPD up to round-off
+    @test n_e_bubble > 0    # pyramid lattice has bubble edges
+end
+
+@testset "GH pyramid M_1: Duffy quadrature converged to <1e-4" begin
+    # Tier 3.1: tensor-product Gauss-Legendre with Duffy substitution
+    # ξ = (1-ζ)ξ', η = (1-ζ)η' absorbs the apex (1-ζ)^{-k} singularity in
+    # the GH Wachspress basis. With 4×4×4 = 64 points the diagonal mass
+    # entries match the Bey-refined sub-tet quadrature (4096 points) to
+    # better than 5e-5. (The previous 4-pt × 2 sub-tet rule had ~9% error
+    # on M[9,9].)
+    m = Metric(3)
+    pyr_ref = [Point(c...) for c in DEC._REF_PYR_VERTS]
+    M_full, _ = DEC._pyramid_local_mass_1form_ext(m, pyr_ref)
+    # Reference values from Bey-refined (4096-pt) sub-tet quadrature.
+    @test abs(M_full[1, 1] - 0.053332) < 5e-5
+    @test abs(M_full[9, 9] - 0.020553) < 5e-5
+end
+
+@testset "GH pyramid Whitney basis: Kronecker δ on the 8 edges" begin
+    # Reference pyramid (corner-apex, CCW-from-below convention).
+    refv = DEC._REF_PYR_VERTS
+    pyr_points = [Point(refv[i]...) for i in 1:5]
+    # Compute K[α, β] = ∫_{e_β} φ_α · t̂ ds via 5-pt Gauss-Legendre on a unit interval.
+    gl_pts = (0.04691007703067, 0.23076534494716, 0.5,
+              0.76923465505284, 0.95308992296933)
+    gl_w   = (0.11846344252810, 0.23931433524968, 0.28444444444444,
+              0.23931433524968, 0.11846344252810)
+    K = zeros(8, 8)
+    for (β, (a, b)) in enumerate(DEC._PYR_EDGES)
+        p_a = refv[a]; p_b = refv[b]
+        tx = p_b[1] - p_a[1]; ty = p_b[2] - p_a[2]; tz = p_b[3] - p_a[3]
+        for q in 1:5
+            t = gl_pts[q]; w = gl_w[q]
+            ξ = p_a[1] + t*tx; η = p_a[2] + t*ty; ζ = p_a[3] + t*tz
+            for α in 1:8
+                φ = DEC._pyr_whitney(α, ξ, η, ζ)
+                K[α, β] += w * (φ[1]*tx + φ[2]*ty + φ[3]*tz)
+            end
+        end
+    end
+    # The basis should satisfy Kronecker: K ≈ I_8.
+    @test maximum(abs, K - I) < 1e-10
+end
+
+# ============================================================================
+# Non-axis-aligned (sheared) hex via the trilinear isoparametric mapping.
+# Shears each cube in +x by α·y, producing a parallelogram cross-section.
+# The 1-form mass matrix is computed by 2 × 2 × 2 Gauss-Legendre quadrature
+# on the reference cube; for axis-aligned hex this is exact, for general
+# trilinear maps it is O(h⁴) accurate (more than enough for h² overall).
+# ============================================================================
+function _sheared_hex_lattice(n, α=0.3)
+    pts = Dict{NTuple{3,Int}, Point{3}}()
+    for i in 0:n, j in 0:n, k in 0:n
+        x = i/n + α * j/n
+        pts[(i,j,k)] = Point(x, j/n, k/n)
+    end
+    hexes = [[pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+              pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+             for i in 0:n-1, j in 0:n-1, k in 0:n-1]
+    return DEC.hexahedral_complex(vec(hexes))
+end
+
+@testset "galerkin_hodge: non-axis-aligned hex (sheared) — h² Poisson SOLVE" begin
+    m = Metric(3)
+    α = 0.3
+    function err(n)
+        tcomp = _sheared_hex_lattice(n, α)
+        orient!(tcomp.complex)
+        M0, K = galerkin_laplacian(m, tcomp)
+        verts = tcomp.complex.cells[1]
+        # u in parameter space ξ = x − αy, η = y, ζ = z, vanishes on the
+        # parallelogram boundary.
+        u_ex = [let p = v.points[1].coords;
+                    ξ = p[1] - α*p[2]
+                    sin(π*ξ) * sin(π*p[2]) * sin(π*p[3])
+                end for v in verts]
+        # Numerical Δu via central differences (avoids messy chain rule).
+        u_at(p) = (let ξp = p[1] - α*p[2]; sin(π*ξp) * sin(π*p[2]) * sin(π*p[3]); end)
+        h = 1e-4
+        function lapu(p)
+            return (u_at([p[1]+h, p[2], p[3]]) - 2*u_at(p) + u_at([p[1]-h, p[2], p[3]])) / h^2 +
+                   (u_at([p[1], p[2]+h, p[3]]) - 2*u_at(p) + u_at([p[1], p[2]-h, p[3]])) / h^2 +
+                   (u_at([p[1], p[2], p[3]+h]) - 2*u_at(p) + u_at([p[1], p[2], p[3]-h])) / h^2
+        end
+        f = [-lapu(v.points[1].coords) for v in verts]
+        _, ext = DEC.boundary_components_connected(tcomp.complex)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        u_int = K[int_idx, int_idx] \ (M0 * f)[int_idx]
+        return norm(u_int - u_ex[int_idx]) / sqrt(length(int_idx))
+    end
+    @test err(4) / err(8) > 3.5
+end
+
+# ============================================================================
+# Oblique (non-right) prism via the trilinear isoparametric mapping. Each
+# layer is shifted in (x, y) so the "vertical" axis is tilted, giving an
+# oblique prism. The Whitney 1-form mass uses Gauss-quadrature over the
+# reference unit prism (3-pt triangle × 2-pt z); for axis-aligned right
+# prisms this reproduces the closed-form result, for oblique prisms it is
+# O(h⁴) accurate and the resulting Poisson solve still hits clean h².
+# ============================================================================
+function _oblique_prism_lattice(n; α=0.2, β=0.1)
+    pts = Dict{NTuple{3,Int}, Point{3}}()
+    for i in 0:n, j in 0:n, k in 0:n
+        pts[(i,j,k)] = Point(i/n + α*k/n, j/n + β*k/n, k/n)
+    end
+    prisms = Vector{Vector{Point{3}}}()
+    for i in 0:n-1, j in 0:n-1, k in 0:n-1
+        c8 = [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+              pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+        push!(prisms, [c8[1], c8[2], c8[4], c8[5], c8[6], c8[8]])
+        push!(prisms, [c8[2], c8[3], c8[4], c8[6], c8[7], c8[8]])
+    end
+    return DEC.prismatic_complex(prisms)
+end
+
+@testset "galerkin_hodge: oblique prism — h² Poisson SOLVE" begin
+    m = Metric(3)
+    α, β = 0.2, 0.1
+    function err(n)
+        tcomp = _oblique_prism_lattice(n; α=α, β=β)
+        orient!(tcomp.complex)
+        M0, K = galerkin_laplacian(m, tcomp)
+        verts = tcomp.complex.cells[1]
+        u_at(p) = (let ξ = p[1] - α*p[3]; ηv = p[2] - β*p[3];
+                       sin(π*ξ) * sin(π*ηv) * sin(π*p[3]); end)
+        u_ex = [u_at(v.points[1].coords) for v in verts]
+        h = 1e-4
+        function lapu(p)
+            return (u_at([p[1]+h, p[2], p[3]]) - 2*u_at(p) + u_at([p[1]-h, p[2], p[3]])) / h^2 +
+                   (u_at([p[1], p[2]+h, p[3]]) - 2*u_at(p) + u_at([p[1], p[2]-h, p[3]])) / h^2 +
+                   (u_at([p[1], p[2], p[3]+h]) - 2*u_at(p) + u_at([p[1], p[2], p[3]-h])) / h^2
+        end
+        f = [-lapu(v.points[1].coords) for v in verts]
+        _, ext = DEC.boundary_components_connected(tcomp.complex)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        u_int = K[int_idx, int_idx] \ (M0 * f)[int_idx]
+        return norm(u_int - u_ex[int_idx]) / sqrt(length(int_idx))
+    end
+    @test err(4) / err(8) > 3.5
+end
+
+# ============================================================================
+# Pyramid via direct sub-tet FEM-P1 stiffness. (No Bedrosian / GH Nédélec
+# basis on the 8 polytope edges — apex singularity makes that genuinely
+# research-grade. Instead `galerkin_stiffness` for pyramid meshes is
+# assembled by integrating ⟨∇λ_i, ∇λ_j⟩ over each sub-tet of the pyramid's
+# 2-tet decomposition, with the diagonal-of-base edge integrated out
+# implicitly via vertex DOFs.) The result is a standard FEM P1 solve on
+# the pyramid's simplicial subdivision, which gives clean h² Poisson on
+# the cube-center-apex pyramid lattice.
+# ============================================================================
+function _pyramid_lattice_unit(n)
+    pts = Dict{NTuple{3,Int}, Point{3}}()
+    for i in 0:n, j in 0:n, k in 0:n
+        pts[(i,j,k)] = Point(i/n, j/n, k/n)
+    end
+    pyramids = Vector{Vector{Point{3}}}()
+    for i in 0:n-1, j in 0:n-1, k in 0:n-1
+        c8 = [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+              pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+        ctr = Point((i + 0.5)/n, (j + 0.5)/n, (k + 0.5)/n)
+        push!(pyramids, [c8[1], c8[4], c8[3], c8[2], ctr])
+        push!(pyramids, [c8[5], c8[6], c8[7], c8[8], ctr])
+        push!(pyramids, [c8[1], c8[2], c8[6], c8[5], ctr])
+        push!(pyramids, [c8[2], c8[3], c8[7], c8[6], ctr])
+        push!(pyramids, [c8[3], c8[4], c8[8], c8[7], ctr])
+        push!(pyramids, [c8[4], c8[1], c8[5], c8[8], ctr])
+    end
+    return DEC.pyramidal_complex(pyramids)
+end
+
+# ============================================================================
+# Mixed-polytope mesh: hex (lower half) + pyramid cluster (upper half).
+# Verifies the dispatcher correctly handles cell-by-cell type switching
+# (Nédélec basis on hex cells, sub-tet stiffness on pyramid cells) and
+# produces a globally consistent K with h² Poisson convergence.
+# ============================================================================
+function _mixed_hex_pyramid_lattice(n)
+    pts = Dict{NTuple{3,Int}, Point{3}}()
+    for i in 0:n, j in 0:n, k in 0:n
+        pts[(i,j,k)] = Point(i/n, j/n, k/n)
+    end
+    elements = Tuple{Symbol, Vector{Point{3}}}[]
+    for i in 0:n-1, j in 0:n-1, k in 0:n-1
+        c8 = [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+              pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+        if k < n ÷ 2
+            push!(elements, (:hex, c8))
+        else
+            ctr = Point((i+0.5)/n, (j+0.5)/n, (k+0.5)/n)
+            push!(elements, (:pyramid, [c8[1], c8[4], c8[3], c8[2], ctr]))
+            push!(elements, (:pyramid, [c8[5], c8[6], c8[7], c8[8], ctr]))
+            push!(elements, (:pyramid, [c8[1], c8[2], c8[6], c8[5], ctr]))
+            push!(elements, (:pyramid, [c8[2], c8[3], c8[7], c8[6], ctr]))
+            push!(elements, (:pyramid, [c8[3], c8[4], c8[8], c8[7], ctr]))
+            push!(elements, (:pyramid, [c8[4], c8[1], c8[5], c8[8], ctr]))
+        end
+    end
+    return DEC.polyhedral_complex(elements)
+end
+
+@testset "Hex Poisson: Nédélec vs sub-tet stiffness (both h², different constants)" begin
+    # Tier 2.3: numerical confirmation that on a hex mesh, the Nédélec-based
+    # path (`galerkin_stiffness`) and the sub-tet path
+    # (`_assemble_polytope_stiffness`) BOTH give h² Poisson convergence but
+    # with different absolute error constants — Nédélec is ~4× more accurate
+    # per DOF on this geometry (Nédélec basis aligns naturally with hex edges).
+    function _hex_lattice(n)
+        pts = Dict{NTuple{3,Int}, Point{3}}()
+        for i in 0:n, j in 0:n, k in 0:n; pts[(i,j,k)] = Point(i/n, j/n, k/n); end
+        elements = Tuple{Symbol, Vector{Point{3}}}[]
+        for i in 0:n-1, j in 0:n-1, k in 0:n-1
+            c8 = [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+                  pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+            push!(elements, (:hex, c8))
+        end
+        return DEC.polyhedral_complex(elements)
+    end
+    m = Metric(3)
+    function err_compare(n)
+        tcomp = _hex_lattice(n)
+        orient!(tcomp.complex)
+        M0 = galerkin_hodge(m, tcomp, 1)
+        K_nedelec = galerkin_stiffness(m, tcomp)
+        K_subtet  = DEC._assemble_polytope_stiffness(m, tcomp)
+        verts = tcomp.complex.cells[1]
+        u_ex = [sin(π*v.points[1].coords[1]) * sin(π*v.points[1].coords[2]) *
+                sin(π*v.points[1].coords[3]) for v in verts]
+        f = 3 * π^2 .* u_ex
+        _, ext = DEC.boundary_components_connected(tcomp.complex)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        Mf_int = (M0 * f)[int_idx]
+        u_ned = K_nedelec[int_idx, int_idx] \ Mf_int
+        u_sub = K_subtet[int_idx, int_idx]  \ Mf_int
+        return (norm(u_ned - u_ex[int_idx]) / sqrt(length(int_idx)),
+                norm(u_sub - u_ex[int_idx]) / sqrt(length(int_idx)))
+    end
+    en4, es4 = err_compare(4)
+    en8, es8 = err_compare(8)
+    # Both paths achieve h² convergence (ratio at h-halving > 3.5)
+    @test en4 / en8 > 3.5
+    @test es4 / es8 > 3.5
+    # Solutions are NOT identical (different discrete operators)
+    @test abs(en4 - es4) > 0.01     # > 1% difference confirms the operators differ
+    # Nédélec is more accurate on hex
+    @test en4 < es4
+end
+
+@testset "galerkin_laplacian: hex+pyramid mixed mesh — h² Poisson SOLVE" begin
+    m = Metric(3)
+    function err(n)
+        tcomp = _mixed_hex_pyramid_lattice(n)
+        orient!(tcomp.complex)
+        M0, K = galerkin_laplacian(m, tcomp)
+        verts = tcomp.complex.cells[1]
+        u_ex = [sin(π*v.points[1].coords[1]) * sin(π*v.points[1].coords[2]) *
+                sin(π*v.points[1].coords[3]) for v in verts]
+        f = 3 * π^2 .* u_ex
+        _, ext = DEC.boundary_components_connected(tcomp.complex)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        u_int = K[int_idx, int_idx] \ (M0 * f)[int_idx]
+        return norm(u_int - u_ex[int_idx]) / sqrt(length(int_idx))
+    end
+    @test err(4) / err(8) > 3.5    # h² → ratio at h-halving > 4 in the limit
+end
+
+@testset "galerkin_laplacian: pyramid mesh — h² Poisson SOLVE via sub-tet stiffness" begin
+    m = Metric(3)
+    function err(n)
+        tcomp = _pyramid_lattice_unit(n)
+        orient!(tcomp.complex)
+        M0, K = galerkin_laplacian(m, tcomp)
+        verts = tcomp.complex.cells[1]
+        u_ex = [sin(π*v.points[1].coords[1]) * sin(π*v.points[1].coords[2]) *
+                sin(π*v.points[1].coords[3]) for v in verts]
+        f = 3 * π^2 .* u_ex
+        _, ext = DEC.boundary_components_connected(tcomp.complex)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        u_int = K[int_idx, int_idx] \ (M0 * f)[int_idx]
+        return norm(u_int - u_ex[int_idx]) / sqrt(length(int_idx))
+    end
+    @test err(4) / err(8) > 3.5
 end

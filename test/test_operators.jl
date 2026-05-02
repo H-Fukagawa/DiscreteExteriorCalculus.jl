@@ -218,9 +218,79 @@ end
             circumcenter_hodge_op = DEC.circumcenter_hodge(m, circum_mesh, k, true)
             barycentric_hodge_op = DEC.barycentric_hodge(m, bary_mesh, k, true)
             corrected_hodge_op = DEC.corrected_barycentric_hodge(m, bary_mesh, k, true)
-            
+
             @test size(circumcenter_hodge_op) == size(barycentric_hodge_op)
             @test size(circumcenter_hodge_op) == size(corrected_hodge_op)
         end
     end
+end
+
+# ============================================================================
+# Sharp / flat musical isomorphisms on polytope meshes (Tier 3.2).
+# Sharp: 1-form on edges → vector field at vertices (per-vertex least squares).
+# Flat:  vector field at vertices → 1-form on edges (midpoint rule, ⟨X̄,Δ⟩_m).
+# For affine vector fields on quasi-uniform meshes, sharp ∘ flat = id at
+# interior nodes (the least-squares system has exact solution = the field).
+# ============================================================================
+@testset "sharp / flat: polytope meshes (hex / prism / pyramid)" begin
+    function _build_lattice(kind, n)
+        pts = Dict{NTuple{3,Int}, Point{3}}()
+        for i in 0:n, j in 0:n, k in 0:n; pts[(i,j,k)] = Point(i/n, j/n, k/n); end
+        elements = Tuple{Symbol, Vector{Point{3}}}[]
+        for i in 0:n-1, j in 0:n-1, k in 0:n-1
+            c8 = [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+                  pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+            if kind == :hex
+                push!(elements, (:hex, c8))
+            elseif kind == :prism
+                push!(elements, (:prism, [c8[1], c8[2], c8[3], c8[5], c8[6], c8[7]]))
+                push!(elements, (:prism, [c8[1], c8[3], c8[4], c8[5], c8[7], c8[8]]))
+            else  # :pyramid
+                ctr = Point((i+0.5)/n, (j+0.5)/n, (k+0.5)/n)
+                push!(elements, (:pyramid, [c8[1], c8[4], c8[3], c8[2], ctr]))
+                push!(elements, (:pyramid, [c8[5], c8[6], c8[7], c8[8], ctr]))
+                push!(elements, (:pyramid, [c8[1], c8[2], c8[6], c8[5], ctr]))
+                push!(elements, (:pyramid, [c8[2], c8[3], c8[7], c8[6], ctr]))
+                push!(elements, (:pyramid, [c8[3], c8[4], c8[8], c8[7], ctr]))
+                push!(elements, (:pyramid, [c8[4], c8[1], c8[5], c8[8], ctr]))
+            end
+        end
+        return DEC.polyhedral_complex(elements)
+    end
+
+    m = Metric(3)
+    for kind in (:hex, :prism, :pyramid)
+        tcomp = _build_lattice(kind, 3)
+        DEC.orient!(tcomp.complex)
+        comp = tcomp.complex
+        verts = comp.cells[1]
+        # Affine vector field
+        X = [[v.points[1].coords[1] + 2*v.points[1].coords[2],
+              3*v.points[1].coords[3],
+              v.points[1].coords[1] - v.points[1].coords[2]] for v in verts]
+        # Round-trip via TC overload (delegates to comp method)
+        ω = flat(m, tcomp, X)
+        X_back = sharp(m, tcomp, ω)
+        # Interior nodes recover the affine field exactly
+        _, ext = DEC.boundary_components_connected(comp)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        max_err = maximum(norm(X_back[i] - X[i]) for i in int_idx)
+        @test max_err < 1e-10
+    end
+end
+
+@testset "sharp / flat: API parity for CellComplex and TriangulatedComplex" begin
+    m = Metric(3)
+    pts = Dict{NTuple{3,Int}, Point{3}}()
+    for i in 0:1, j in 0:1, k in 0:1; pts[(i,j,k)] = Point(Float64(i), Float64(j), Float64(k)); end
+    c8 = [pts[(0,0,0)], pts[(1,0,0)], pts[(1,1,0)], pts[(0,1,0)],
+          pts[(0,0,1)], pts[(1,0,1)], pts[(1,1,1)], pts[(0,1,1)]]
+    tcomp = DEC.polyhedral_complex([(:hex, c8)])
+    DEC.orient!(tcomp.complex)
+    n_e = length(tcomp.complex.cells[2])
+    ω = randn(n_e)
+    @test sharp(m, tcomp, ω) == sharp(m, tcomp.complex, ω)
+    X = [[Float64(i), Float64(2i), Float64(-i)] for i in 1:length(tcomp.complex.cells[1])]
+    @test flat(m, tcomp, X) == flat(m, tcomp.complex, X)
 end
