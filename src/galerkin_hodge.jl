@@ -1000,6 +1000,17 @@ function _polytope_2form_via_subtets(m::Metric{3}, top::Cell{3},
     n_F = length(face_local_indices)
     Mloc = zeros(n_F, n_F)
     # Process each sub-tet τ: compute its 4×4 Whitney 2-form mass and project.
+    # Internal sub-tet faces (those NOT lying on a polytope face) get T = 0
+    # — i.e., the polytope-face Whitney form's restriction is constant flux
+    # on each sub-tet with NO contribution from internal faces. This is the
+    # PARTITION-OF-UNITY extension. (An alternative is to treat internal
+    # faces as bubble DOFs and Schur-condense them, but that gives the
+    # ENERGY-OPTIMAL marginal mass, which empirically degrades the Hodge
+    # Laplacian convergence rate vs the partition-of-unity choice — see the
+    # commit history for the experimental evidence.) Full higher-order
+    # convergence requires either (a) keeping the bubble DOFs as INDEPENDENT
+    # global DOFs in the d/M assembly, or (b) a true polytope RT_0/Nédélec
+    # face basis (not sub-tet projection).
     for (s_simple, _sign) in sub_tets
         s = Simplex(s_simple)
         M_tau, triplets = _local_mass_2form(m, s)   # 4×4, 4 triangle faces
@@ -1016,12 +1027,7 @@ function _polytope_2form_via_subtets(m::Metric{3}, top::Cell{3},
             A_sigma = _polygon_area(m, tri_pts)
             T_tau[α, F] = A_sigma / face_areas[F]
             # Sign correction: align the sub-tet face's Whitney-2-form normal
-            # with the polytope face's canonical outward normal. The Whitney
-            # 2-form `w_{ijk}` of `_local_mass_2form` for triplet (i,j,k) gives
-            # a vector field whose direction is determined by the cyclic order
-            # of vertices in `t`. Compute the sub-tet face normal in the same
-            # cyclic order; if it points opposite to the polytope face normal,
-            # flip the sign.
+            # with the polytope face's canonical outward normal.
             v1 = tri_pts[1].coords; v2 = tri_pts[2].coords; v3 = tri_pts[3].coords
             e12 = (v2[1]-v1[1], v2[2]-v1[2], v2[3]-v1[3])
             e13 = (v3[1]-v1[1], v3[2]-v1[2], v3[3]-v1[3])

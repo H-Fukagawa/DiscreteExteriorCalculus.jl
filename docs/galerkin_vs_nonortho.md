@@ -346,6 +346,30 @@ Hex achieves super-convergence (matching the ≈h^{2.5} measured for
 simplified `M_2` construction (sub-tet projection without bubble DOFs)
 and (for pyramid) the Schur-condensed `M_1`. Both still give SPD,
 solvable systems with stable error decrease — sufficient for ★d★d
-operator pipelines on mixed polytope meshes; full higher-order
-convergence on prism/pyramid would require Whitney-form-conformant `M_2`
-constructions (Bedrosian-style bubble DOFs).
+operator pipelines on mixed polytope meshes.
+
+#### Why bubble DOFs (Schur) don't fix prism/pyramid M_2 convergence
+
+A natural-looking improvement is to add the internal sub-tet faces as
+per-polytope **bubble DOFs** (each shared between 2 sub-tets within
+the polytope), then Schur-condense them locally to keep the global
+DOF count = polytope-face count. This gives an "energy-optimal
+marginal" M_eff:
+
+    M_eff = M_FF − M_FB M_BB^{-1} M_BF.
+
+Empirically, this DEGRADES the Hodge Laplacian convergence on prism
+meshes (rate drops from ≈1.7 to ≈1.4 between n=4 and n=8). Reason: the
+Schur-marginal mass is the energy-OPTIMAL extension of polytope-face
+coefficients into the full sub-tet FE space, which minimizes the L²
+norm of the bubble component — but that's a WORSE L² inner product on
+the polytope-face subspace than the partition-of-unity extension
+(bubbles ≡ 0). The current code therefore uses partition-of-unity (T
+= 0 on internal faces), and the bubble-DOF experiment is documented
+in the commit history but not used.
+
+Truly improving prism/pyramid `M_2` convergence requires either
+(a) keeping bubble DOFs as **independent global DOFs** (changing the
+edge/face count in d_0/d_1 assembly — significant API change), or
+(b) implementing a true polytope `RT_0`/Nédélec face basis (analogous
+to the hex isoparametric construction). Future work.
