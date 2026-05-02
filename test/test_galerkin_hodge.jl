@@ -600,3 +600,52 @@ end
     end
     @test err(4) / err(8) > 3.5
 end
+
+# ============================================================================
+# Pyramid via direct sub-tet FEM-P1 stiffness. (No Bedrosian / GH Nédélec
+# basis on the 8 polytope edges — apex singularity makes that genuinely
+# research-grade. Instead `galerkin_stiffness` for pyramid meshes is
+# assembled by integrating ⟨∇λ_i, ∇λ_j⟩ over each sub-tet of the pyramid's
+# 2-tet decomposition, with the diagonal-of-base edge integrated out
+# implicitly via vertex DOFs.) The result is a standard FEM P1 solve on
+# the pyramid's simplicial subdivision, which gives clean h² Poisson on
+# the cube-center-apex pyramid lattice.
+# ============================================================================
+function _pyramid_lattice_unit(n)
+    pts = Dict{NTuple{3,Int}, Point{3}}()
+    for i in 0:n, j in 0:n, k in 0:n
+        pts[(i,j,k)] = Point(i/n, j/n, k/n)
+    end
+    pyramids = Vector{Vector{Point{3}}}()
+    for i in 0:n-1, j in 0:n-1, k in 0:n-1
+        c8 = [pts[(i,j,k)],   pts[(i+1,j,k)],   pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+              pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+        ctr = Point((i + 0.5)/n, (j + 0.5)/n, (k + 0.5)/n)
+        push!(pyramids, [c8[1], c8[4], c8[3], c8[2], ctr])
+        push!(pyramids, [c8[5], c8[6], c8[7], c8[8], ctr])
+        push!(pyramids, [c8[1], c8[2], c8[6], c8[5], ctr])
+        push!(pyramids, [c8[2], c8[3], c8[7], c8[6], ctr])
+        push!(pyramids, [c8[3], c8[4], c8[8], c8[7], ctr])
+        push!(pyramids, [c8[4], c8[1], c8[5], c8[8], ctr])
+    end
+    return DEC.pyramidal_complex(pyramids)
+end
+
+@testset "galerkin_laplacian: pyramid mesh — h² Poisson SOLVE via sub-tet stiffness" begin
+    m = Metric(3)
+    function err(n)
+        tcomp = _pyramid_lattice_unit(n)
+        orient!(tcomp.complex)
+        M0, K = galerkin_laplacian(m, tcomp)
+        verts = tcomp.complex.cells[1]
+        u_ex = [sin(π*v.points[1].coords[1]) * sin(π*v.points[1].coords[2]) *
+                sin(π*v.points[1].coords[3]) for v in verts]
+        f = 3 * π^2 .* u_ex
+        _, ext = DEC.boundary_components_connected(tcomp.complex)
+        bnd = Set(ext.cells[1])
+        int_idx = [i for (i, v) in enumerate(verts) if !(v in bnd)]
+        u_int = K[int_idx, int_idx] \ (M0 * f)[int_idx]
+        return norm(u_int - u_ex[int_idx]) / sqrt(length(int_idx))
+    end
+    @test err(4) / err(8) > 3.5
+end

@@ -135,7 +135,17 @@ galerkin_stiffness(m::Metric, comp::CellComplex) =
 # For TriangulatedComplex: use the polytope-aware `galerkin_hodge(m, tcomp, 2)`
 # (which dispatches to hex Nédélec for hex meshes, etc.), NOT the simplicial-
 # only CellComplex path. d_0 is structural and works on either complex type.
+#
+# Special case: if the mesh contains pyramid cells (which lack a Nédélec
+# 1-form basis on the 8 polytope edges), assemble the stiffness directly via
+# per-polytope sub-tet integration. This gives the FEM P1 stiffness on the
+# pyramid's simplicial subdivision and provides clean h² Poisson convergence,
+# at the cost of not exposing a separate `galerkin_hodge(_, _, 2)` matrix.
 function galerkin_stiffness(m::Metric, tcomp::TriangulatedComplex)
+    if !simplicial(tcomp.complex) &&
+       any(length(top.points) == 5 for top in tcomp.complex.cells[end])
+        return _assemble_polytope_stiffness(m, tcomp)
+    end
     d0 = exterior_derivative(tcomp.complex, 1)
     return transpose(d0) * galerkin_hodge(m, tcomp, 2) * d0
 end
@@ -812,4 +822,90 @@ function _assemble_galerkin_polytope_1form(m::Metric{3},
         end
     end
     return sparse(rows, cols, vals, n_e, n_e)
+end
+
+# ============================================================================
+# Pyramid Whitney 1-form mass — pragmatic Wachspress / sub-tet hybrid.
+#
+# Pyramid lowest-order Nédélec is research-grade because of the apex
+# singularity; proper Bedrosian / Gradinaru-Hiptmair bases use rational
+# polynomials with apex-singular terms. Here we instead compute the
+# pyramid's contribution to the Galerkin FEM stiffness DIRECTLY, using
+# the stored sub-tet decomposition `tcomp.simplices[pyramid]`:
+#
+#   K_pyramid[i, j] = Σ_{sub-tets t} V_t · ⟨∇λ_i^t, ∇λ_j^t⟩
+#
+# This is the standard FEM P1 stiffness on the pyramid's simplicial
+# subdivision (the diagonal-of-base edge is integrated out implicitly).
+# The 1-form *mass* matrix on pyramid edges is NOT exposed as a separate
+# operator (a true Nédélec basis on the 8 polytope edges would need the
+# Bedrosian construction); only the per-pyramid stiffness contribution
+# is provided, sufficient for `galerkin_laplacian` / Poisson solves.
+#
+# For purely pyramid meshes, this gives clean h² Poisson convergence;
+# for pyramid meshes mixed with hex / prism / tet, the global stiffness
+# is assembled by mixing per-cell-type contributions.
+
+function _pyramid_local_stiffness(m::Metric{3}, pyr_points::Vector{Point{3}})
+    @assert length(pyr_points) == 5 "pyramid must have exactly 5 vertices"
+    K = zeros(5, 5)
+    for tv in ((1, 2, 3, 5), (1, 3, 4, 5))   # _PYRAMID_TETS
+        s = Simplex([pyr_points[v] for v in tv])
+        V = volume(m, s)
+        grads = _barycentric_gradients(s)
+        for ti in 1:4, tj in 1:4
+            K[tv[ti], tv[tj]] += V * inner_product(m, grads[ti], grads[tj])
+        end
+    end
+    return K
+end
+
+# Per-cell stiffness contribution for any polytope via its stored sub-tet
+# decomposition. Used as a fallback for pyramid (no edge-basis available)
+# and as a uniform path for mixed-polytope meshes that include pyramids.
+function _polytope_local_stiffness(m::Metric{3}, top::Cell{3},
+    sub_tets::Vector{SignedSimpleSimplex{3}})
+    n_pts = length(top.points)
+    K = zeros(n_pts, n_pts)
+    point_to_local = Dict{Point{3}, Int}()
+    for (i, p) in enumerate(top.points)
+        point_to_local[p] = i
+    end
+    for (s_simple, _sign) in sub_tets
+        s = Simplex(s_simple)
+        V = volume(m, s)
+        grads = _barycentric_gradients(s)
+        local_idx = [point_to_local[p] for p in s.points]
+        for ti in 1:4, tj in 1:4
+            K[local_idx[ti], local_idx[tj]] += V *
+                inner_product(m, grads[ti], grads[tj])
+        end
+    end
+    return K
+end
+
+# Global stiffness via per-polytope sub-tet integration. Works on any
+# polytope mesh (tet / hex / prism / pyramid / mixed). For pure simplicial
+# meshes this is identical to `transpose(d0) * M_1 * d0` with sub-tet Whitney;
+# for hex / prism it differs from the Nédélec stiffness but still gives
+# h² Poisson convergence.
+function _assemble_polytope_stiffness(m::Metric{3}, tcomp::TriangulatedComplex{3, 4})
+    comp = tcomp.complex
+    n_v = length(comp.cells[1])
+    point_to_idx = Dict{Point{3}, Int}()
+    for (i, vc) in enumerate(comp.cells[1])
+        point_to_idx[vc.points[1]] = i
+    end
+    rows, cols, vals = Int[], Int[], Float64[]
+    for top in comp.cells[4]
+        K_loc = _polytope_local_stiffness(m, top, tcomp.simplices[top])
+        local_to_global = [point_to_idx[p] for p in top.points]
+        n_loc = length(top.points)
+        for i in 1:n_loc, j in 1:n_loc
+            push!(rows, local_to_global[i])
+            push!(cols, local_to_global[j])
+            push!(vals, K_loc[i, j])
+        end
+    end
+    return sparse(rows, cols, vals, n_v, n_v)
 end
