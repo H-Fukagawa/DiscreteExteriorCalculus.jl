@@ -13,9 +13,9 @@ using LinearAlgebra: dot, inv, Diagonal
 # off-diagonal entries couple cells that share a top-dim simplex.
 #
 # Currently supported:
-#     k = 1 (0-form mass / P1 FEM)         on 2D and 3D simplicial meshes
-#     k = 2 (1-form Whitney mass)          on 2D and 3D simplicial meshes
-#     k = 3 (2-form Whitney mass)          on 3D simplicial meshes only
+#     k = 1 (0-form mass / P1 FEM)         on simplicial and polytope meshes
+#     k = 2 (1-form mass)                  on simplicial meshes and 3D polytope meshes
+#     k = 3 (2-form mass)                  on 3D simplicial and 3D polytope meshes
 #     k = 4 (3-form / volume mass)         on 3D simplicial meshes only
 
 export galerkin_hodge
@@ -67,10 +67,12 @@ Currently:
 - `k = 1`: P1 mass matrix on polytope vertices (correct for any
   polytope decomposition since the basis is linear on each sub-tet
   and all sub-tet vertices are polytope vertices).
-- `k > 1` on a non-simplicial complex: not implemented — Whitney 1- and
-  2-forms on a polytope edge/face require a polytope-specific
-  basis (e.g. trilinear-hex Nedelec), which differs from the
-  sub-tet Whitney form.
+- `k = 2`, 3D: polytope-aware 1-form mass on tet / hex / prism /
+  pyramid cells. Hex and prism use lowest-order Nedelec bases with
+  isoparametric Piola pull-back; pyramid uses a Schur-condensed
+  Bedrosian / Gradinaru-Hiptmair 10-edge construction.
+- `k = 3`, 3D: polytope-aware 2-form mass on tet / hex / prism /
+  pyramid cells using Whitney / RT_0-style face bases.
 """
 function galerkin_hodge(m::Metric{N}, tcomp::TriangulatedComplex{N, K},
     k::Int) where {N, K}
@@ -127,8 +129,10 @@ conditions; for the eigenproblem solve `K v = λ M_0 v`.
 
 `comp_or_tcomp` may be a `CellComplex` (must be simplicial) or a
 `TriangulatedComplex`. The `TriangulatedComplex` version dispatches
-through `galerkin_hodge(m, tcomp, 2)`, which currently supports
-simplicial meshes (any) and axis-aligned hex meshes (Nédélec).
+through the polytope-aware assembly path: simplicial meshes use the
+standard Whitney stiffness, hex / prism meshes use Nedelec 1-form mass,
+and pyramid-containing meshes assemble the P1 stiffness directly on
+the stored sub-tet decomposition.
 """
 galerkin_stiffness(m::Metric, comp::CellComplex) =
     transpose(exterior_derivative(comp, 1)) * galerkin_hodge(m, comp, 2) *
@@ -170,7 +174,128 @@ end
 galerkin_laplacian(m::Metric, tcomp::TriangulatedComplex) =
     (galerkin_hodge(m, tcomp, 1), galerkin_stiffness(m, tcomp))
 
-export galerkin_lumped_mass, galerkin_laplacian_lumped
+export galerkin_load_vector
+"""
+    galerkin_load_vector(m, comp_or_tcomp, f; quad_order=4) -> Vector{Float64}
+
+Assemble the Galerkin/P1 load vector for a scalar source function `f`:
+
+    b_i = ∫ φ_i(x) f(x) dV.
+
+`f` is called as `f(p::Point)`. This is more accurate than using
+`galerkin_hodge(m, ..., 1) * f_at_vertices` when `f` is not represented
+well by its nodal P1 interpolant. `quad_order` controls the tensor-product
+Gauss-Legendre order used after Duffy substitution on each simplex. The
+default `quad_order=4` is intentionally conservative for smooth
+manufactured solutions.
+"""
+function galerkin_load_vector(m::Metric{N}, comp::CellComplex{N, K}, f;
+    quad_order::Int=4) where {N, K}
+    @assert simplicial(comp) "galerkin_load_vector(::CellComplex, ...) " *
+        "requires a simplicial complex; pass a TriangulatedComplex for polytope meshes"
+    point_to_idx = _vertex_point_index(comp)
+    b = zeros(length(comp.cells[1]))
+    for top in comp.cells[K]
+        _accumulate_simplex_load!(b, point_to_idx, m, Simplex(top), f, quad_order)
+    end
+    return b
+end
+
+function galerkin_load_vector(m::Metric{N}, tcomp::TriangulatedComplex{N, K}, f;
+    quad_order::Int=4) where {N, K}
+    if simplicial(tcomp.complex)
+        return galerkin_load_vector(m, tcomp.complex, f; quad_order=quad_order)
+    end
+    point_to_idx = _vertex_point_index(tcomp.complex)
+    b = zeros(length(tcomp.complex.cells[1]))
+    for top in tcomp.complex.cells[K]
+        for (s_simple, _sign) in tcomp.simplices[top]
+            _accumulate_simplex_load!(b, point_to_idx, m, Simplex(s_simple), f, quad_order)
+        end
+    end
+    return b
+end
+
+function _vertex_point_index(comp::CellComplex{N}) where N
+    point_to_idx = Dict{Point{N}, Int}()
+    for (i, vc) in enumerate(comp.cells[1])
+        point_to_idx[vc.points[1]] = i
+    end
+    return point_to_idx
+end
+
+function _accumulate_simplex_load!(b::Vector{Float64}, point_to_idx::Dict{Point{N}, Int},
+    m::Metric{N}, s::Simplex{N, K}, f, quad_order::Int) where {N, K}
+    n = K - 1
+    @assert n == N "Galerkin load vector expects full-dimensional simplices"
+    V = volume(m, s)
+    scale = factorial(n) * V
+    for (λ, w_ref) in _simplex_duffy_quadrature(n, quad_order)
+        coords = zeros(Float64, N)
+        @inbounds for i in 1:K
+            coords .+= λ[i] .* s.points[i].coords
+        end
+        p = Point(coords)
+        fp = f(p)
+        w = scale * w_ref
+        @inbounds for i in 1:K
+            b[point_to_idx[s.points[i]]] += w * λ[i] * fp
+        end
+    end
+    return b
+end
+
+function _gauss_legendre_unit(order::Int)
+    if order == 1
+        return ((0.5,), (1.0,))
+    elseif order == 2
+        return (_GAUSS_2PT, _GAUSS_2PT_W)
+    elseif order == 3
+        a = sqrt(3 / 5) / 2
+        return ((0.5 - a, 0.5, 0.5 + a), (5/18, 4/9, 5/18))
+    elseif order == 4
+        return (_GAUSS_LEG_4PT, _GAUSS_LEG_4PT_W)
+    else
+        error("quad_order=$order is not supported; use 1, 2, 3, or 4")
+    end
+end
+
+function _simplex_duffy_quadrature(n::Int, order::Int)
+    @assert n >= 1
+    nodes, weights = _gauss_legendre_unit(order)
+    result = Tuple{Vector{Float64}, Float64}[]
+    u = zeros(Float64, n)
+    w_u = zeros(Float64, n)
+
+    function visit(depth::Int)
+        if depth > n
+            λ = zeros(Float64, n + 1)
+            rem = 1.0
+            jac = 1.0
+            for i in 1:n
+                λ[i] = rem * u[i]
+                if i < n
+                    jac *= (1 - u[i])^(n - i)
+                end
+                rem *= 1 - u[i]
+            end
+            λ[n + 1] = rem
+            push!(result, (λ, prod(w_u) * jac))
+            return
+        end
+        for q in eachindex(nodes)
+            u[depth] = nodes[q]
+            w_u[depth] = weights[q]
+            visit(depth + 1)
+        end
+    end
+
+    visit(1)
+    return result
+end
+
+export galerkin_lumped_mass, galerkin_blended_mass, galerkin_laplacian_lumped,
+    galerkin_laplacian_blended
 """
     galerkin_lumped_mass(M_0::AbstractMatrix) -> Diagonal
 
@@ -199,6 +324,26 @@ galerkin_lumped_mass(M_0::AbstractMatrix) =
     Diagonal(vec(sum(M_0; dims=2)))
 
 """
+    galerkin_blended_mass(M_0::AbstractMatrix, θ::Real)
+
+Blend the consistent and row-sum lumped 0-form mass matrices:
+
+    M_θ = θ M_0 + (1 - θ) galerkin_lumped_mass(M_0),  0 ≤ θ ≤ 1.
+
+This is a diagnostic / tuning helper for pointwise Poisson accuracy. `θ = 1`
+is the standard Galerkin RHS mass, while `θ = 0` is the fully lumped RHS mass.
+"""
+function galerkin_blended_mass(M_0::AbstractMatrix, θ::Real)
+    @assert 0 <= θ <= 1 "θ must satisfy 0 ≤ θ ≤ 1"
+    if θ == 0
+        return galerkin_lumped_mass(M_0)
+    elseif θ == 1
+        return M_0
+    end
+    return θ * M_0 + (1 - θ) * galerkin_lumped_mass(M_0)
+end
+
+"""
     galerkin_laplacian_lumped(m, comp_or_tcomp) -> (M_0_lumped::Diagonal, K::SparseMatrixCSC)
 
 Convenience wrapper: returns `(galerkin_lumped_mass(M_0), K)` with the
@@ -209,6 +354,17 @@ see `galerkin_lumped_mass` for the trade-off.
 function galerkin_laplacian_lumped(m::Metric, comp_or_tcomp)
     M_0, K = galerkin_laplacian(m, comp_or_tcomp)
     return (galerkin_lumped_mass(M_0), K)
+end
+
+"""
+    galerkin_laplacian_blended(m, comp_or_tcomp, θ) -> (M_θ, K)
+
+Convenience wrapper returning the blended RHS mass matrix and the consistent
+Galerkin stiffness. See `galerkin_blended_mass`.
+"""
+function galerkin_laplacian_blended(m::Metric, comp_or_tcomp, θ::Real)
+    M_0, K = galerkin_laplacian(m, comp_or_tcomp)
+    return (galerkin_blended_mass(M_0, θ), K)
 end
 
 export galerkin_hodge_laplacian_block
@@ -542,10 +698,9 @@ end
 # Each axis block (4 × 4) is given in closed form by tensor products of
 # ∫ ν_α ν_β dy = L · (1/3 if α==β else 1/6).
 #
-# Currently restricted to AXIS-ALIGNED hexes (vertices in standard order
-# 1=(0,0,0), 2=(Lx,0,0), 3=(Lx,Ly,0), 4=(0,Ly,0), 5=(0,0,Lz), …). Non-axis-
-# aligned hexes need the trilinear isoparametric mapping, which requires
-# numerical quadrature and is left as future work.
+# Axis-aligned hexes reduce to the closed-form block structure above.
+# General trilinear / sheared hexes use the isoparametric quadrature path
+# below with the same reference basis and covariant Piola pull-back.
 
 # Canonical local edge orientation: (from_local_idx, to_local_idx) such that
 # the geometric direction goes along +axis.

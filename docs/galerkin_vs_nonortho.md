@@ -109,6 +109,27 @@ API: `galerkin_laplacian_lumped(m, comp_or_tcomp)` returns
 clean h² convergence; pick per mesh type (or run both at one resolution
 and take the smaller error).
 
+### RHS integration and blended mass tuning
+
+Two API helpers are available for reducing the pointwise error constant
+without changing the Galerkin stiffness:
+
+- `galerkin_load_vector(m, comp_or_tcomp, f; quad_order=4)` assembles the
+  true P1 load vector `b_i = ∫ φ_i f dV` by quadrature. This avoids the
+  extra nodal-interpolation error in `M_0 * f_at_vertices`.
+- `galerkin_blended_mass(M_0, θ)` builds
+  `M_θ = θ M_0 + (1-θ) M_0_lumped`, with `θ=1` equal to the consistent
+  mass and `θ=0` equal to row-sum lumping. `galerkin_laplacian_blended`
+  returns `(M_θ, K)` directly.
+
+`bench/galerkin_accuracy.jl` compares consistent, lumped, blended, and
+exact-load RHS strategies on the same manufactured problems. On the
+current unit-square and Kuhn-tet tests, `θ≈0.25` gives a notably smaller
+pointwise error constant than either endpoint while retaining the same
+h² convergence rate. This is a tuning strategy, not a universal default:
+regular hex / prism cases should still be checked before replacing the
+consistent mass.
+
 
 ## Both methods converge to the SAME continuous solution (h² verified)
 
@@ -172,10 +193,10 @@ Concretely:
 | Symmetry of stiffness | strict SPD | ≈ symmetric (5% asymmetry observed in 2D) |
 | Dual mesh required | no | yes (centroid) |
 | `★★ = ±I` identity | weak only | strict (with caveat: `★_2_dual` not the inverse of corrected `★_2`) |
-| Polytope (hex/prism/pyramid) `k>1` | not yet | yes (drop-in for `★_2` in 3D) |
+| Polytope (hex/prism/pyramid) `k>1` | yes for 3D `k=2,3` | yes (drop-in for `★_2` in 3D) |
 | Polytope `k=1` (vertex mass) | yes | yes |
 | Fits `★d★d` DSL | no (different API) | yes (drop-in for `circumcenter_hodge`) |
-| 2D 1-form Laplacian | not directly tested | h³ super-convergent on regular skewed lattices |
+| 2D 1-form Laplacian | h³ via mixed Galerkin | h³ super-convergent on regular skewed lattices |
 | Strict `d² = 0` | yes | yes |
 | Standard FEEC theory | yes | no (FVM-like) |
 
@@ -184,12 +205,14 @@ Concretely:
 
 - **Use Galerkin Hodge** if you want SPD systems, no dual mesh, FEM-
   style error analysis, mesh-skew robustness in the consistency
-  norm, or simplicial meshes only.
+  norm, or 3D tet / hex / prism / pyramid polytope support through the
+  Galerkin API.
 
 - **Use over-relaxed non-orthogonal Hodge** if you need the
   `★d★d` DEC pipeline (existing `differential_operator_sequence`
-  works), polytope mesh support, or just smaller pointwise solve
-  error on smooth manufactured tests at modest `n`.
+  works), diagonal-Hodge polytope support in that pipeline, or just
+  smaller pointwise solve error on smooth manufactured tests at modest
+  `n`.
 
 The two are complementary, not interchangeable; both achieve h²
 convergence on the standard Poisson problem.
@@ -198,10 +221,12 @@ convergence on the standard Poisson problem.
 ## Reproducing these numbers
 
 The Galerkin numbers are produced by tests in
-`test/test_galerkin_hodge.jl`. The nonortho numbers were measured on
-the `nonorthogonal-hodge` branch with equivalent test code. Switching
-between branches reproduces the numbers above on the same problem
-geometry and manufactured solution.
+`test/test_galerkin_hodge.jl`. The nonortho numbers in Table 1 and
+Table 2 are historical branch measurements from `nonorthogonal-hodge`
+with equivalent test code. The current `corrected_barycentric_hodge`
+path can differ in calibration (see the lumped-mass note above), so
+future updates should record the exact branch / commit and regenerate
+the tables from one benchmark script.
 
 
 ## Update: 1-form Hodge Laplacian via mixed Galerkin
@@ -239,13 +264,16 @@ formulation in both 2D and 3D simplicial meshes.
 
 ## Polytope (hex / prism / pyramid) `k > 1` Galerkin Hodge
 
-### Hex (axis-aligned): implemented
+### Hex: implemented (axis-aligned + trilinear isoparametric)
 
-`galerkin_hodge(m, tcomp::TriangulatedComplex, 2)` for an axis-aligned
-hexahedral mesh now uses the lowest-order Nédélec edge element. The
-12 × 12 local mass matrix is block-diagonal in three axis groups of 4,
-each given in closed form by tensor products of `∫ ν_α ν_β dy = L · (1/3 if α==β else 1/6)`
-on the 1D linear hat functions.
+`galerkin_hodge(m, tcomp::TriangulatedComplex, 2)` for hexahedral
+meshes uses the lowest-order Nédélec edge element. Axis-aligned hexes
+reduce to a 12 × 12 local mass matrix that is block-diagonal in three
+axis groups of 4, each given by tensor products of
+`∫ ν_α ν_β dy = L · (1/3 if α==β else 1/6)` on the 1D linear hat
+functions. General trilinear / sheared hexes use the same reference
+basis with covariant Piola pull-back and 2 × 2 × 2 Gauss-Legendre
+quadrature.
 
 Hex unit-cube Poisson SOLVE on a `n³` mesh:
 
@@ -329,14 +357,18 @@ gives clean h² Poisson convergence:
 (Expected ratios for h²: ×2.25 / ×1.78.)
 
 For mixed polytope meshes that combine pyramid with hex / prism / tet,
-the over-relaxed `nonorthogonal_hodge` remains the only `★_2` option.
+Galerkin now assembles global SPD `M_1` and `M_2` operators through the
+polytope-aware dispatcher. The over-relaxed `nonorthogonal_hodge`
+remains useful when the existing diagonal `★d★d` DEC pipeline is the
+main requirement.
 
-### Non-axis-aligned hex: not yet implemented
+### Non-axis-aligned hex: implemented for trilinear maps
 
-The current hex implementation assumes the hex's first vertex is the
-"bottom-left" corner and the edges align with positive `(x, y, z)`.
-General trilinear hexes (rotated, sheared, or with curved edges)
-require the isoparametric mapping with numerical quadrature.
+The current hex implementation uses a trilinear isoparametric mapping
+with 2 × 2 × 2 quadrature. The test suite verifies clean h² Poisson
+convergence on sheared hex lattices. More distorted / curved hexahedra
+would need higher quadrature and mesh-quality checks, but affine and
+trilinear shears no longer require a separate implementation path.
 
 ### Polytope `k=3` (face / 2-form) mass
 
@@ -403,11 +435,12 @@ Hdiv basis with apex-singular rational terms (Kronecker δ verified;
 SPD), but the Hodge Laplacian convergence rate on pyramid meshes is
 unchanged from the sub-tet-projection alternative — the bottleneck is
 the **Schur-condensed M_1** (Bedrosian Type-II construction), not the
-M_2. Improving pyramid Hodge Laplacian convergence to h² would require
-keeping the M_1 base-diagonal bubble DOFs as INDEPENDENT global edges
-(architectural change to d_0 / M_1 assembly) — future work.
+M_2. Improving pyramid Hodge Laplacian convergence to h² requires a
+compatible enriched de Rham pair: bubble/enriched 1-form DOFs, matching
+2-form DOFs, and a corresponding `d_1` that does not leave the added
+edge DOFs in the discrete curl kernel.
 
-#### Why bubble DOFs (Schur) don't fix prism/pyramid M_2 convergence
+#### Why local bubble DOFs (Schur) don't fix the mixed block
 
 A natural-looking improvement is to add the internal sub-tet faces as
 per-polytope **bubble DOFs** (each shared between 2 sub-tets within
@@ -427,11 +460,14 @@ the polytope-face subspace than the partition-of-unity extension
 = 0 on internal faces), and the bubble-DOF experiment is documented
 in the commit history but not used.
 
-Truly improving prism/pyramid `M_2` convergence requires either
-(a) keeping bubble DOFs as **independent global DOFs** (changing the
-edge/face count in d_0/d_1 assembly — significant API change), or
-(b) implementing a true polytope `RT_0`/Nédélec face basis (analogous
-to the hex isoparametric construction). Future work.
+For pyramids, a related experiment keeps the two base-diagonal
+Bedrosian bubble edges as independent global edge DOFs. That is also
+insufficient by itself: with the current lowest-order RT_0 face space,
+the curl of the bubble 1-form has zero projected face flux, so the
+new edge DOFs are effectively unconstrained in the mixed Hodge
+Laplacian block. Truly improving pyramid convergence therefore needs a
+compatible enriched 1-form / 2-form pair rather than only changing the
+local Schur condensation.
 
 
 ## Diagrams

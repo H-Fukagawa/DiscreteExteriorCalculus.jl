@@ -1,6 +1,6 @@
 using Test, DiscreteExteriorCalculus
 const DEC = DiscreteExteriorCalculus
-using LinearAlgebra: norm, diag, eigvals, Symmetric, dot
+using LinearAlgebra: norm, diag, eigvals, Symmetric, dot, I
 using SparseArrays: sparse, SparseMatrixCSC
 
 # ============================================================================
@@ -88,6 +88,32 @@ end
     M03 = galerkin_hodge(m3, comp3, 1)
     expected3 = sum(volume(m3, Simplex(c)) for c in comp3.cells[4])
     @test sum(M03) ≈ expected3
+end
+
+@testset "galerkin_load_vector: exactness and conservation" begin
+    m = Metric(2)
+    s = Simplex(Point(0.0, 0.0), Point(1.0, 0.0), Point(0.0, 1.0))
+    comp = CellComplex([s])
+    orient!(comp)
+    M0 = galerkin_hodge(m, comp, 1)
+    verts = comp.cells[1]
+
+    b_const = galerkin_load_vector(m, comp, _p -> 1.0)
+    @test b_const ≈ M0 * ones(length(verts))
+    @test sum(b_const) ≈ volume(m, s)
+
+    f_linear(p) = p.coords[1] + 2 * p.coords[2]
+    f_nodes = [f_linear(v.points[1]) for v in verts]
+    @test galerkin_load_vector(m, comp, f_linear) ≈ M0 * f_nodes
+
+    m3 = Metric(3)
+    hex_pts = [Point(c...) for c in DEC._HEX_REF_VERT_BIT]
+    tcomp = DEC.hexahedral_complex(hex_pts)
+    orient!(tcomp.complex)
+    M0_hex = galerkin_hodge(m3, tcomp, 1)
+    b_hex = galerkin_load_vector(m3, tcomp, _p -> 1.0)
+    @test b_hex ≈ M0_hex * ones(length(tcomp.complex.cells[1]))
+    @test sum(b_hex) ≈ 1.0
 end
 
 # ============================================================================
@@ -214,6 +240,22 @@ end
     @test el4 / el8 > 3.5
     # Consistent also h² (sanity)
     @test ec4 / ec8 > 3.5
+end
+
+@testset "galerkin_blended_mass: endpoints and interpolation" begin
+    m = Metric(2)
+    _, tcomp = DEC.triangulated_lattice([1.0, 0.0], [0.0, 1.0], 2, 2)
+    orient!(tcomp.complex)
+    M0, K = galerkin_laplacian(m, tcomp.complex)
+    M_lumped = galerkin_lumped_mass(M0)
+    @test galerkin_blended_mass(M0, 0) == M_lumped
+    @test galerkin_blended_mass(M0, 1) == M0
+    @test galerkin_blended_mass(M0, 0.25) ≈ 0.25 * M0 + 0.75 * M_lumped
+    Mθ, Kθ = galerkin_laplacian_blended(m, tcomp.complex, 0.25)
+    @test Mθ ≈ galerkin_blended_mass(M0, 0.25)
+    @test Kθ == K
+    @test_throws AssertionError galerkin_blended_mass(M0, -0.1)
+    @test_throws AssertionError galerkin_blended_mass(M0, 1.1)
 end
 
 @testset "galerkin_laplacian: Poisson solve on 3D Kuhn unit cube (h²)" begin
