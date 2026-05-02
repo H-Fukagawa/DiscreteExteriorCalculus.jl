@@ -489,20 +489,47 @@ end
 end
 
 # ============================================================================
-# Pyramid Nédélec via Gradinaru-Hiptmair (1999) Wachspress basis.
-# The 8-edge GH basis satisfies Kronecker (`∫_{e_β} φ_α · t̂ ds = δ_{αβ}`) but
-# is NOT de-Rham consistent on its own (the absent base-diagonal Whitney form
-# leaves a residual in ∇N_a expansions). The 1-form mass dispatcher therefore
-# errors out for pyramid meshes; pyramid Galerkin Poisson is assembled via
-# per-sub-tet ⟨∇λ_i,∇λ_j⟩ instead (see test below).
+# Pyramid Nédélec via Bedrosian Type-II / Gradinaru-Hiptmair (1999) basis.
+# The 10-edge basis (8 polytope edges + 2 base-diagonal bubbles) is fully
+# de-Rham consistent (∇N_a expands exactly in the basis for all 5 vertices).
+# The mass dispatcher returns an 8×8 Schur-condensed M_eff on the polytope
+# edges (SPD). Pyramid Galerkin Poisson is assembled via per-sub-tet
+# ⟨∇λ_i,∇λ_j⟩ for correct K_FEM (see test below).
 # ============================================================================
-@testset "galerkin_hodge: pyramid 1-form raises informative error" begin
+@testset "galerkin_hodge: pyramid 1-form returns SPD 8×8 M_eff (both orientations)" begin
     m = Metric(3)
-    pts = [Point(0.0,0.0,0.0), Point(1.0,0.0,0.0), Point(1.0,1.0,0.0), Point(0.0,1.0,0.0),
-           Point(0.5,0.5,0.5)]
-    tcomp = DEC.pyramidal_complex([pts])
-    orient!(tcomp.complex)
-    @test_throws ErrorException galerkin_hodge(m, tcomp, 2)
+    for (label, pts) in (
+        ("CCW-from-below", [Point(0.0,0.0,0.0), Point(0.0,1.0,0.0), Point(1.0,1.0,0.0),
+                            Point(1.0,0.0,0.0), Point(0.5,0.5,0.5)]),
+        ("CCW-from-above", [Point(0.0,0.0,0.0), Point(1.0,0.0,0.0), Point(1.0,1.0,0.0),
+                            Point(0.0,1.0,0.0), Point(0.5,0.5,0.5)]))
+        tcomp = DEC.pyramidal_complex([pts])
+        orient!(tcomp.complex)
+        M1 = galerkin_hodge(m, tcomp, 2)
+        @test size(M1, 1) == 8 && size(M1, 2) == 8
+        @test maximum(abs, M1 - M1') < 1e-12
+        @test minimum(eigvals(Symmetric(Matrix(M1)))) > 0    # SPD
+    end
+end
+
+@testset "GH pyramid 10-DOF basis: de Rham consistency" begin
+    # Σ_{α ∋ a} ε_{α,a} φ_α(x) = ∇N_a(x) at arbitrary interior points
+    # for all a ∈ 1..5 — verifies the 10-edge (8 polytope + 2 base diagonals)
+    # basis is de-Rham complete.
+    edges_ext = collect(DEC._PYR_EDGES_EXT)
+    for (ξ, η, ζ) in ((0.5, 0.5, 0.0), (0.3, 0.3, 0.3),
+                      (0.1, 0.4, 0.5), (0.2, 0.2, 0.7))
+        ∇Ns = [collect(DEC._pyr_grad_N(i, ξ, η, ζ)) for i in 1:5]
+        for a in 1:5
+            ψ = zeros(3)
+            for (α, (from, to)) in enumerate(edges_ext)
+                φ = collect(DEC._pyr_whitney(α, ξ, η, ζ))
+                if from == a; ψ -= φ; end
+                if to   == a; ψ += φ; end
+            end
+            @test norm(ψ - ∇Ns[a]) < 1e-12
+        end
+    end
 end
 
 @testset "GH pyramid Whitney basis: face conformity on shared base face" begin

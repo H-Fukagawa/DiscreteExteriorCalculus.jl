@@ -754,16 +754,15 @@ function _prism_local_mass_1form(::Metric{3}, prism_points::Vector{Point{3}})
     return Mloc, edge_pairs
 end
 
-# Polytope-aware 1-form mass dispatcher. Replaces the old hex-only
-# `_assemble_galerkin_hex_1form` and handles mixed simplicial / hex / prism
-# meshes (and tets via the existing simplicial Whitney).
-#
-# Note: pyramid is intentionally NOT dispatched here. The 8-edge GH/Wachspress
-# basis (`_pyramid_local_mass_1form`) is callable directly for research /
-# Kronecker checks but is NOT de-Rham consistent on its own (the absent
-# base-diagonal Whitney form leaves a residual in ∇N_a expansions). Pyramid
-# meshes therefore route `galerkin_stiffness` through `_assemble_polytope_stiffness`
-# (sub-tet ∇λ assembly) — see the `galerkin_stiffness(m, tcomp)` special case.
+# Polytope-aware 1-form mass dispatcher. Handles tet / hex / prism / pyramid
+# uniformly. Pyramid uses the 10-edge Bedrosian Type-II construction (8
+# polytope edges + 2 base-diagonal bubbles) Schur-condensed locally to an
+# 8×8 effective Hodge mass on the polytope edges (SPD; valid ★_2 inner product
+# for Hodge Laplacian / Whitney-form-based applications). NOTE: K = d_0' M_1
+# d_0 with this Schur-condensed M_1 differs from FEM stiffness by a low-rank
+# correction per pyramid; for correct Poisson stiffness use the per-sub-tet
+# path in `_assemble_polytope_stiffness` (which is what `galerkin_stiffness`
+# special-cases on pyramid meshes).
 function _polytope_1form_local_mass(m::Metric{3}, top::Cell{3})
     n_pts = length(top.points)
     if n_pts == 4
@@ -775,11 +774,7 @@ function _polytope_1form_local_mass(m::Metric{3}, top::Cell{3})
     elseif n_pts == 8
         return _hex_local_mass_1form(m, top.points)
     elseif n_pts == 5
-        error("Galerkin Hodge k=2 on a pyramid: the lowest-order Nédélec edge " *
-              "basis on a pyramid (8 polytope edges) is not de-Rham consistent " *
-              "without rational diagonal corrections (Bedrosian / GH). Use " *
-              "`galerkin_stiffness(m, tcomp)` directly — it bypasses M_1 on " *
-              "pyramid meshes and assembles K via per-sub-tet ⟨∇λ_i,∇λ_j⟩.")
+        return _pyramid_local_mass_1form(m, top.points)
     else
         error("Galerkin Hodge k=2: unsupported top-dim cell with $n_pts vertices")
     end
@@ -1001,8 +996,20 @@ end
 const _PYR_EDGES = ((1,2), (1,4), (2,3), (3,4),  # 4 base edges (i<j canonical)
                     (1,5), (2,5), (3,5), (4,5))  # 4 lateral edges
 
+# Bedrosian Type-II extension: add BOTH base diagonals (1,3) and (2,4) as
+# 9th and 10th "bubble" basis functions — local to each pyramid, never
+# shared with neighbors. Adding both diagonals makes the 10-edge basis
+# de-Rham complete:
+#   ∇N_a = Σ_{α ∋ a in 10-edge graph} ε_{α,a} φ_α   (exact, all a ∈ 1..5)
+# (One diagonal closes the gap for vertices 1, 3, 5 only; the other diagonal
+# is needed for vertices 2 and 4 because their gradient residuals involve the
+# other diagonal Whitney form `φ_{24}^raw`.) With both, K_local_5x5 =
+# (d_loc_10x5)^T M_full_10x10 (d_loc_10x5) recovers FEM stiffness exactly.
+const _PYR_EDGES_EXT = (_PYR_EDGES..., (1, 3), (2, 4))
+
 @inline function _pyr_whitney(α::Int, ξ::Float64, η::Float64, ζ::Float64)
-    a, b = _PYR_EDGES[α]
+    # Supports α ∈ 1..10 (last two indices = base diagonals 1↔3 and 2↔4 bubbles).
+    a, b = _PYR_EDGES_EXT[α]
     Na = _pyr_N(a, ξ, η, ζ); Nb = _pyr_N(b, ξ, η, ζ)
     ga = _pyr_grad_N(a, ξ, η, ζ); gb = _pyr_grad_N(b, ξ, η, ζ)
     return (Na*gb[1] - Nb*ga[1], Na*gb[2] - Nb*ga[2], Na*gb[3] - Nb*ga[3])
@@ -1023,9 +1030,30 @@ const _GAUSS_TET_4PT_BARY = (
 )
 const _GAUSS_TET_4PT_W = (1/24, 1/24, 1/24, 1/24)
 
-function _pyramid_local_mass_1form(::Metric{3}, pyr_points::Vector{Point{3}})
+# Build the full 10×10 Bedrosian Type-II mass matrix (8 polytope edges +
+# 2 base-diagonal bubbles) on a physical pyramid via 4-pt Gauss quadrature
+# on each of the 2 sub-tets, with isoparametric Wachspress map and
+# covariant Piola pull-back for the Whitney basis.
+function _pyramid_local_mass_1form_ext(::Metric{3}, pyr_points::Vector{Point{3}})
     @assert length(pyr_points) == 5 "pyramid must have exactly 5 vertices"
-    Mloc = zeros(8, 8)
+    # Canonicalize base orientation: my reference uses CCW-from-below
+    # (n_base = (v_2-v_1) × (v_4-v_1) points AWAY from apex). If the user's
+    # input has the opposite handedness (CCW-from-above), swap local v_2 ↔ v_4
+    # to flip the base traversal. This relabels the polytope-edge identifiers
+    # so they reference the SWAPPED indices internally; we map back when
+    # returning `edge_pairs` so callers see edges in terms of the ORIGINAL input.
+    v1 = pyr_points[1].coords; v2 = pyr_points[2].coords
+    v3 = pyr_points[3].coords; v4 = pyr_points[4].coords; v5 = pyr_points[5].coords
+    n_base = ((v2[2]-v1[2])*(v4[3]-v1[3]) - (v2[3]-v1[3])*(v4[2]-v1[2]),
+              (v2[3]-v1[3])*(v4[1]-v1[1]) - (v2[1]-v1[1])*(v4[3]-v1[3]),
+              (v2[1]-v1[1])*(v4[2]-v1[2]) - (v2[2]-v1[2])*(v4[1]-v1[1]))
+    apex_dir = (v5[1] - v1[1], v5[2] - v1[2], v5[3] - v1[3])
+    handedness = n_base[1]*apex_dir[1] + n_base[2]*apex_dir[2] + n_base[3]*apex_dir[3]
+    swapped = handedness > 0
+    pts = swapped ?
+        [pyr_points[1], pyr_points[4], pyr_points[3], pyr_points[2], pyr_points[5]] :
+        pyr_points
+    Mloc = zeros(10, 10)
     Jbuf = zeros(3, 3)
 
     for sub in 1:2
@@ -1043,7 +1071,7 @@ function _pyramid_local_mass_1form(::Metric{3}, pyr_points::Vector{Point{3}})
             fill!(Jbuf, 0.0)
             for i in 1:5
                 gN = _pyr_grad_N(i, ξ, η, ζ)
-                pi_coords = pyr_points[i].coords
+                pi_coords = pts[i].coords
                 for k in 1:3
                     Jbuf[k, 1] += gN[1] * pi_coords[k]
                     Jbuf[k, 2] += gN[2] * pi_coords[k]
@@ -1053,13 +1081,13 @@ function _pyramid_local_mass_1form(::Metric{3}, pyr_points::Vector{Point{3}})
             detJ = Jbuf[1,1]*(Jbuf[2,2]*Jbuf[3,3] - Jbuf[2,3]*Jbuf[3,2]) -
                    Jbuf[1,2]*(Jbuf[2,1]*Jbuf[3,3] - Jbuf[2,3]*Jbuf[3,1]) +
                    Jbuf[1,3]*(Jbuf[2,1]*Jbuf[3,2] - Jbuf[2,2]*Jbuf[3,1])
-            @assert detJ > 1e-14 "pyramid Jacobian non-positive at quadrature point ($detJ); check vertex ordering or degenerate pyramid"
+            @assert detJ > 1e-14 "pyramid Jacobian non-positive after canonicalization ($detJ); degenerate pyramid?"
             Jinv = inv(Jbuf)
             Mc = Jinv * transpose(Jinv)
 
-            φref = ntuple(α -> _pyr_whitney(α, ξ, η, ζ), 8)
+            φref = ntuple(α -> _pyr_whitney(α, ξ, η, ζ), 10)
             wj = wq * detJ
-            for α in 1:8, β in 1:8
+            for α in 1:10, β in 1:10
                 va = φref[α]; vb = φref[β]
                 Mca1 = Mc[1,1]*va[1] + Mc[1,2]*va[2] + Mc[1,3]*va[3]
                 Mca2 = Mc[2,1]*va[1] + Mc[2,2]*va[2] + Mc[2,3]*va[3]
@@ -1068,5 +1096,37 @@ function _pyramid_local_mass_1form(::Metric{3}, pyr_points::Vector{Point{3}})
             end
         end
     end
-    return Mloc, collect(_PYR_EDGES)
+    if swapped
+        # Permute rows/cols so the returned matrix is indexed by edges that
+        # reference the ORIGINAL input vertex labels (with v_2 ↔ v_4 swap
+        # accounted for). Map: canonical α → internal α' such that the edge
+        # endpoints in the ORIGINAL labeling match `_PYR_EDGES_EXT[α]`.
+        P = (2, 1, 4, 3, 5, 8, 7, 6, 9, 10)
+        Mout = zeros(10, 10)
+        @inbounds for α in 1:10, β in 1:10
+            Mout[α, β] = Mloc[P[α], P[β]]
+        end
+        return Mout, collect(_PYR_EDGES_EXT)
+    end
+    return Mloc, collect(_PYR_EDGES_EXT)
+end
+
+# Schur-condense the 2 base-diagonal bubble DOFs to obtain an 8×8 effective
+# mass on the polytope edges only. Mathematically:
+#   M_eff = M_PP − M_PD M_DD^{-1} M_DP
+# where the partition is over (8 polytope edges) and (2 diagonal bubbles).
+# M_eff is SPD (Schur complement of an SPD matrix), so it is a valid Hodge
+# inner product on the 8-edge polytope space — usable directly as ★_2 for
+# Hodge Laplacian / Whitney-form-based applications. NOTE: this is NOT the
+# same as building K via `d_polytope^T M_eff d_polytope`; that K differs from
+# the FEM stiffness K_FEM by a low-rank matrix per pyramid (see header comment).
+# For correct K_FEM use the per-sub-tet stiffness path in
+# `_assemble_polytope_stiffness` (which is what `galerkin_stiffness` does).
+function _pyramid_local_mass_1form(m::Metric{3}, pyr_points::Vector{Point{3}})
+    M_full, _ = _pyramid_local_mass_1form_ext(m, pyr_points)
+    M_PP = M_full[1:8, 1:8]
+    M_PD = M_full[1:8, 9:10]    # 8 × 2
+    M_DD = M_full[9:10, 9:10]   # 2 × 2 SPD
+    M_eff = M_PP - M_PD * (M_DD \ M_PD')
+    return M_eff, collect(_PYR_EDGES)
 end

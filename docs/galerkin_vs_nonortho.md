@@ -197,43 +197,42 @@ wedge Nédélec element (9 edges = 3 bottom + 3 top + 3 vertical) with
 Both axis-aligned and general (oblique) prisms achieve clean h²
 Poisson convergence.
 
-### Pyramid: partial — sub-tet stiffness path
+### Pyramid: Bedrosian Type-II 10-edge basis with Schur condensation
 
 The lowest-order pyramidal Nédélec basis (Bedrosian 1992 /
 Gradinaru-Hiptmair 1999) is genuinely research-grade because of the
 apex singularity. We implement the GH/Wachspress shape functions and
-the 8-edge Whitney basis `φ_{ab} = N_a∇N_b − N_b∇N_a` with two
-properties verified by tests in `test_galerkin_hodge.jl`:
+the **10-edge Whitney basis** (8 polytope edges + 2 base-diagonal
+"bubble" Whitney forms), verified by tests in `test_galerkin_hodge.jl`:
 
-1. **Kronecker δ**: `∫_{e_β} φ_α · t̂ ds = δ_{αβ}` on the 8 reference edges.
+1. **Kronecker δ**: `∫_{e_β} φ_α · t̂ ds = δ_{αβ}` on the 8 reference
+   polytope edges.
 2. **Face conformity**: tangential trace on a shared base face agrees
    across the two adjacent pyramids (covariant Piola `J^{-T}` exactly
    compensates the (ξ,η)→(x,y) permutation that differs between them).
+3. **De Rham**: in the 10-edge graph (with both base diagonals (1,3)
+   and (2,4) as bubble edges), `∇N_a = Σ_{α∋a} ε_{α,a} φ_α` exactly for
+   all 5 nodal vertices.
 
-However, the basis is NOT de-Rham consistent on its own: expanding
-∇N_1 in the 8 basis leaves a residual equal to the absent base-diagonal
-Whitney form `φ_{13}^raw = N_1∇N_3 − N_3∇N_1`. Specifically:
+The two diagonal "bubble" DOFs are local to each pyramid (not shared
+between pyramids). For API uniformity with the 8-polytope-edge global
+edge count, the bubbles are **Schur-condensed locally**:
 
-    ∇N_1 + φ_{13}^raw  =  −φ_{12} − φ_{14} − φ_{15}
+    M_eff = M_PP − M_PD M_DD^{-1} M_DP                  (8×8 SPD)
 
-To close the de Rham gap correctly via the M_1 path requires either:
+`galerkin_hodge(m, tcomp, 2)` returns this `M_eff` for pyramid meshes —
+a valid SPD ★_2 inner product on the polytope edge space, suitable for
+Hodge Laplacian / Whitney-form-based applications. The implementation
+is robust to both base orientations (CCW-from-below and CCW-from-above);
+input vertex order is canonicalized internally.
 
-- **(i) Full 9-DOF assembly**: add the base diagonal as a 9th bubble
-  DOF per pyramid (not shared between pyramids), so `d_0` becomes 5→9
-  and `M_1` becomes 9×9 locally. Then `K = d_0' M_1 d_0` recovers the
-  FEM P1 stiffness exactly. This is the principled Bedrosian Type-II
-  construction.
-- **(ii) Schur-condense locally** to obtain an 8×8 effective mass
-  `M_eff = M_PP − M_PD M_DD^{-1} M_DP`. Note: (ii) does NOT recover
-  K_FEM when used as `d_polytope^T M_eff d_polytope`: the difference
-  is a rank-1 matrix per pyramid `(1/b) w w^T` where
-  `w = d_poly^T M_PD + b · d_diag`.
-
-We currently implement neither (i) nor (ii). `galerkin_hodge(m, tcomp, 2)`
-raises an informative error on pyramid meshes; `galerkin_stiffness(m, tcomp)`
-is special-cased to bypass M_1 entirely on pyramid meshes and assemble
-K directly via per-sub-tet `⟨∇λ_i, ∇λ_j⟩`. On the cube-center-apex
-pyramid lattice this gives clean h² Poisson convergence:
+⚠ **Stiffness caveat**: `K = d_polytope^T M_eff d_polytope` does NOT
+equal the FEM stiffness — the Schur condensation drops bubble couplings
+that contribute to the full GH-Wachspress K. For Poisson stiffness,
+`galerkin_stiffness(m, tcomp)` is special-cased on pyramid meshes to
+bypass M_1 entirely and assemble K directly via per-sub-tet
+`⟨∇λ_i, ∇λ_j⟩` (sub-tet P1 FEM). On the cube-center-apex pyramid
+lattice this gives clean h² Poisson convergence:
 
 | n | err   | rate  |
 |---|-------|-------|
