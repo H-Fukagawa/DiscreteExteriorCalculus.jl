@@ -923,15 +923,25 @@ end
 # rational shape functions + isoparametric Piola pull-back.
 #
 # *** PARTIAL IMPLEMENTATION — research grade ***
-# This basis satisfies the Kronecker property `∫_{e_β} φ_α · t̂ ds = δ_{αβ}`
+# This basis is correctly:
+#   • Kronecker:   `∫_{e_β} φ_α · t̂ ds = δ_{αβ}`            (verified)
+#   • Conformant:  tangential trace on shared base faces matches across
+#                  adjacent pyramids despite their local (ξ,η)→(x,y) maps
+#                  differing by a permutation — covariant Piola J^{-T}
+#                  exactly compensates the swap.            (verified)
 # but is NOT de-Rham consistent on its own. Specifically, expanding ∇N_1 in
 # the 8-edge basis `{φ_{ab} : (a,b) ∈ _PYR_EDGES}` leaves a residual equal to
-# the absent base-diagonal Whitney form `φ_{13}^raw = N_1∇N_3 − N_3∇N_1`.
-# Closing the de Rham gap requires rational corrections `δ_{12} = φ_{13}^raw`
-# etc. (see Bedrosian 1992 / GH 1999), but those corrections break face
-# conformity across base faces shared by neighboring pyramids whose local
-# (ξ, η) parametrizations differ — a true conformant fix needs careful basis
-# design beyond the scope of this iteration.
+# the absent base-diagonal Whitney form `φ_{13}^raw = N_1∇N_3 − N_3∇N_1`:
+#
+#   ∇N_1 + φ_{13}^raw  =  −φ_{12} − φ_{14} − φ_{15}     (raw GH expansion)
+#
+# The de Rham closure requires either (i) adding the base diagonal as a 9th
+# bubble DOF and using full 9-edge assembly (`d_0` becomes 5→9, `M_1` becomes
+# 9×9, and K = d_0' M_1 d_0 recovers the FEM P1 stiffness exactly — this is
+# the principled Bedrosian Type-II construction), or (ii) Schur-condensing
+# the 9th DOF locally to obtain an 8×8 effective mass `M_eff`. Note (ii)
+# does NOT recover K_FEM via `d_polytope^T M_eff d_polytope`: the difference
+# is a rank-1 matrix per pyramid (see math note in the test file).
 #
 # Therefore: this mass matrix is exposed only for direct research use
 # (Kronecker checks, basis evaluation). The polytope-stiffness dispatcher

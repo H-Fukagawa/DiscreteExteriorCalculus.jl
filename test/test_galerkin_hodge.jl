@@ -505,6 +505,49 @@ end
     @test_throws ErrorException galerkin_hodge(m, tcomp, 2)
 end
 
+@testset "GH pyramid Whitney basis: face conformity on shared base face" begin
+    # Two pyramids sharing a square base face at z=0: pyr_A above (apex at +z),
+    # pyr_B below (apex at -z). Shared physical edge (0,0,0)→(0,1,0) is local
+    # edge (1,2) in pyr_A and local edge (1,4) in pyr_B (different local
+    # numberings due to the (ξ,η)→physical permutation). The basis function for
+    # this shared edge MUST give the same tangential trace on the shared base
+    # face from both pyramids — otherwise the global Whitney space is non-
+    # conformant. Verified numerically that the in-plane components match
+    # exactly (the swap in the (ξ,η)→(x,y) map is exactly compensated by
+    # the covariant Piola pull-back J^{-T}).
+    pyr_A = [Point(0.0,0.0,0.0), Point(0.0,1.0,0.0), Point(1.0,1.0,0.0),
+             Point(1.0,0.0,0.0), Point(0.5,0.5,+0.5)]
+    pyr_B = [Point(0.0,0.0,0.0), Point(1.0,0.0,0.0), Point(1.0,1.0,0.0),
+             Point(0.0,1.0,0.0), Point(0.5,0.5,-0.5)]
+    function pyr_phi_phys(α, ξ, η, ζ, pyr_pts)
+        φref = DEC._pyr_whitney(α, ξ, η, ζ)
+        J = zeros(3, 3)
+        for i in 1:5
+            gN = DEC._pyr_grad_N(i, ξ, η, ζ)
+            for k in 1:3
+                J[k,1] += gN[1] * pyr_pts[i].coords[k]
+                J[k,2] += gN[2] * pyr_pts[i].coords[k]
+                J[k,3] += gN[3] * pyr_pts[i].coords[k]
+            end
+        end
+        return inv(J)' * collect(φref)
+    end
+    samples = [(0.3, 0.7), (0.5, 0.5), (0.2, 0.4), (0.7, 0.3), (0.6, 0.8)]
+    max_diff = 0.0
+    for (x, y) in samples
+        # Pyramid A: ξ=x, η=y on base. Pyramid B: ξ=y, η=x on base.
+        φA = pyr_phi_phys(1, x, y, 0.0, pyr_A)   # local edge (1,2) of A
+        φB = pyr_phi_phys(2, y, x, 0.0, pyr_B)   # local edge (1,4) of B
+        max_diff = max(max_diff, abs(φA[1] - φB[1]), abs(φA[2] - φB[2]))
+    end
+    @test max_diff < 1e-12
+    # Bonus: lateral edges have zero in-plane trace on base face (Whitney δ).
+    for (x, y) in samples
+        φA = pyr_phi_phys(5, x, y, 0.0, pyr_A)   # apex edge (1,5)
+        @test abs(φA[1]) + abs(φA[2]) < 1e-12
+    end
+end
+
 @testset "GH pyramid Whitney basis: Kronecker δ on the 8 edges" begin
     # Reference pyramid (corner-apex, CCW-from-below convention).
     refv = DEC._REF_PYR_VERTS

@@ -202,22 +202,38 @@ Poisson convergence.
 The lowest-order pyramidal Nédélec basis (Bedrosian 1992 /
 Gradinaru-Hiptmair 1999) is genuinely research-grade because of the
 apex singularity. We implement the GH/Wachspress shape functions and
-the 8-edge Whitney basis `φ_{ab} = N_a∇N_b − N_b∇N_a`, which satisfies
-the Kronecker δ property `∫_{e_β} φ_α · t̂ ds = δ_{αβ}` (verified
-in `test_galerkin_hodge.jl`). However, this 8-edge basis is NOT
-de-Rham consistent on its own: expanding ∇N_1 in the basis leaves a
-residual equal to the absent base-diagonal Whitney form
-`φ_{13}^raw = N_1∇N_3 − N_3∇N_1`. Closing the de Rham gap requires
-rational diagonal corrections, but those corrections break face
-conformity across base faces shared by neighboring pyramids whose
-local (ξ,η) parametrizations differ.
+the 8-edge Whitney basis `φ_{ab} = N_a∇N_b − N_b∇N_a` with two
+properties verified by tests in `test_galerkin_hodge.jl`:
 
-`galerkin_hodge(m, tcomp, 2)` therefore raises an informative error
-on pyramid meshes. `galerkin_stiffness(m, tcomp)` is special-cased
-to bypass M_1 entirely on pyramid meshes and assemble K directly via
-per-sub-tet `⟨∇λ_i, ∇λ_j⟩` (the standard FEM P1 stiffness on the
-pyramid's 2-tet decomposition). On the cube-center-apex pyramid
-lattice this gives clean h² Poisson convergence:
+1. **Kronecker δ**: `∫_{e_β} φ_α · t̂ ds = δ_{αβ}` on the 8 reference edges.
+2. **Face conformity**: tangential trace on a shared base face agrees
+   across the two adjacent pyramids (covariant Piola `J^{-T}` exactly
+   compensates the (ξ,η)→(x,y) permutation that differs between them).
+
+However, the basis is NOT de-Rham consistent on its own: expanding
+∇N_1 in the 8 basis leaves a residual equal to the absent base-diagonal
+Whitney form `φ_{13}^raw = N_1∇N_3 − N_3∇N_1`. Specifically:
+
+    ∇N_1 + φ_{13}^raw  =  −φ_{12} − φ_{14} − φ_{15}
+
+To close the de Rham gap correctly via the M_1 path requires either:
+
+- **(i) Full 9-DOF assembly**: add the base diagonal as a 9th bubble
+  DOF per pyramid (not shared between pyramids), so `d_0` becomes 5→9
+  and `M_1` becomes 9×9 locally. Then `K = d_0' M_1 d_0` recovers the
+  FEM P1 stiffness exactly. This is the principled Bedrosian Type-II
+  construction.
+- **(ii) Schur-condense locally** to obtain an 8×8 effective mass
+  `M_eff = M_PP − M_PD M_DD^{-1} M_DP`. Note: (ii) does NOT recover
+  K_FEM when used as `d_polytope^T M_eff d_polytope`: the difference
+  is a rank-1 matrix per pyramid `(1/b) w w^T` where
+  `w = d_poly^T M_PD + b · d_diag`.
+
+We currently implement neither (i) nor (ii). `galerkin_hodge(m, tcomp, 2)`
+raises an informative error on pyramid meshes; `galerkin_stiffness(m, tcomp)`
+is special-cased to bypass M_1 entirely on pyramid meshes and assemble
+K directly via per-sub-tet `⟨∇λ_i, ∇λ_j⟩`. On the cube-center-apex
+pyramid lattice this gives clean h² Poisson convergence:
 
 | n | err   | rate  |
 |---|-------|-------|
