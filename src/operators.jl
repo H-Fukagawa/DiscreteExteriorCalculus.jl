@@ -1,7 +1,9 @@
 using SparseArrays: spdiagm, sparse, spzeros, SparseMatrixCSC
-using LinearAlgebra: diag, I
+using LinearAlgebra: diag, I, dot, pinv
+using StaticArrays: SVector
 
-export differential_operator_sequence, barycentric_hodge, corrected_barycentric_hodge
+export differential_operator_sequence, barycentric_hodge, corrected_barycentric_hodge,
+    nonorthogonal_hodge
 """
     differential_operator_sequence(m::Metric{N}, mesh::Mesh{N, K}, expr::String,
         k::Int, primal::Bool) where {N, K}
@@ -137,240 +139,208 @@ function barycentric_hodge(m::Metric{N}, mesh::Mesh{N, K}, k::Int,
 end
 
 """
-    corrected_barycentric_hodge(m::Metric{N}, mesh::Mesh{N, K}, k::Int, primal::Bool; 
-                               use_direct_gradient::Bool=true, use_cross_diffusion::Bool=true) where {N, K}
+    nonorthogonal_hodge(m::Metric{N}, mesh::Mesh{N, K}) -> SparseMatrixCSC
 
-Numerically corrected hodge star operator that addresses orthogonality issues when using
-barycentric centers. Applies corrections using direct gradient and cross diffusion terms
-to reduce numerical errors caused by lack of orthogonality in barycentric dual meshes.
-"""
-function corrected_barycentric_hodge(m::Metric{N}, mesh::Mesh{N, K}, k::Int, primal::Bool; 
-                                   use_direct_gradient::Bool=true, use_cross_diffusion::Bool=true) where {N, K}
-    
-    base_hodge = barycentric_hodge(m, mesh, k, primal)
-    
-    if !use_direct_gradient && !use_cross_diffusion
-        return base_hodge
-    end
-    
-    correction = spzeros(size(base_hodge)...)
-    
-    if use_direct_gradient && k <= K
-        correction += direct_gradient_correction(m, mesh, k, primal)
-    end
-    
-    if use_cross_diffusion && k <= K
-        correction += cross_diffusion_correction(m, mesh, k, primal)
-    end
-    
-    return base_hodge + correction
-end
+Hodge star for primal 1-forms (`★_2`) on a 2D (`N=2, K=3`) or 3D (`N=3, K=4`)
+mesh whose dual is built from non-orthogonal centers (e.g. centroids). Uses
+the OpenFOAM-style over-relaxed decomposition `S = E + T` with `E ∥ d`:
 
-"""
-    direct_gradient_correction(m::Metric{N}, mesh::Mesh{N, K}, k::Int, primal::Bool) where {N, K}
+    flux_e = α_or · (u_N − u_P) + T_e · (1/n_cells) Σ_C g_C
 
-Computes the direct gradient correction term for the hodge operator to address 
-non-orthogonality issues in barycentric dual meshes. Uses geometric relationships
-between primal and dual cells to estimate correction weights.
+where `d_e` is the primal edge vector, `S_e` the dual face area-vector,
+`α_or = (S·S)/(S·d)`, `T_e = S_e − α_or · d_e`, and `g_C` is the per-cell
+"Diamond scheme" gradient: the unique vector such that `(v_j − v_i) · g_C`
+matches the edge value `ω_{ij}` for each edge of the top-dim cell `C`. The
+sum runs over the (up to 2 in 2D / many in 3D) primal top-dim cells incident
+to edge `e`. The result is a sparse `n_edges × n_edges` matrix; the diagonal
+entry coincides with `barycentric_hodge` on orthogonal meshes, and the full
+operator is exact for linear `u` and second-order accurate for smooth `u`
+(versus the first-order vertex-LS reconstruction used previously).
+
+In 2D, `S_e` is the rotated chord between the two adjacent triangle centers
+(or between `e_center` and the single adjacent triangle for boundary edges).
+In 3D, `S_e` accumulates ½(v₁ × v₂) over the triangular elementary duals
+`[e_center, t_center, tet_center]` — equivalent to the area integral of the
+oriented dual face. In both cases the orientation is fixed so `S_e · d_e > 0`.
 """
-function direct_gradient_correction(m::Metric{N}, mesh::Mesh{N, K}, k::Int, primal::Bool) where {N, K}
-    if k == K+1
-        return spzeros(0,0)
+function nonorthogonal_hodge(m::Metric{N}, mesh::Mesh{N, K}) where {N, K}
+    @assert (N == 2 && K == 3) || (N == 3 && K == 4) (
+        "nonorthogonal_hodge supports only 2D (N=2,K=3) and 3D (N=3,K=4)")
+    primal_comp = mesh.primal.complex
+    edges = primal_comp.cells[2]
+    n_edges = length(edges)
+    top_cells = primal_comp.cells[K]
+
+    edge_idx = Dict{Cell{N}, Int}()
+    sizehint!(edge_idx, n_edges)
+    for (i, e) in enumerate(edges)
+        edge_idx[e] = i
     end
-    
-    comp = primal ? mesh.primal.complex : mesh.dual.complex
-    dual_comp = primal ? mesh.dual.complex : mesh.primal.complex
-    
-    n_cells = length(comp.cells[k])
-    n_dual_cells = length(dual_comp.cells[K-k+1])
-    
-    row_inds, col_inds, vals = Int[], Int[], Float64[]
-    
-    for (i, p_cell) in enumerate(comp.cells[k])
-        for (j, d_cell) in enumerate(dual_comp.cells[K-k+1])
-            if has_geometric_relationship(p_cell, d_cell, k, K)
-                correction_val = compute_direct_gradient_weight(m, mesh, p_cell, d_cell, k, primal)
-                if abs(correction_val) > 1e-12
-                    push!(row_inds, j)
-                    push!(col_inds, i)
-                    push!(vals, correction_val)
-                end
+
+    # Per top-dim cell: column indices of its edges + linear-interpolant
+    # gradient reconstruction matrix (Diamond scheme). For a cell with edge
+    # vectors arranged as rows of `mat`, `pinv(mat * m.mat)` is the matrix
+    # G such that `g_C = G · ω_{edges of C}` is the constant gradient of
+    # the unique linear interpolant on C — exact when ω = du.
+    cell_grad = Dict{Cell{N}, Matrix{Float64}}()
+    cell_edge_cols = Dict{Cell{N}, Vector{Int}}()
+    for c in top_cells
+        es = _cell_edges(c)
+        cell_edge_cols[c] = [edge_idx[e] for e in es]
+        mat = zeros(length(es), N)
+        for (i, e) in enumerate(es)
+            mat[i, :] = _primal_edge_vector(e)
+        end
+        cell_grad[c] = pinv(mat * m.mat)
+    end
+
+    rows, cols, vals = Int[], Int[], Float64[]
+    for (i, e) in enumerate(edges)
+        d_e = _primal_edge_vector(e)
+        S_e = _dual_face_area_vector(mesh, e, d_e)
+
+        Sd = dot(S_e, d_e)
+        @assert abs(Sd) > 1e-14 "edge $i: dual face area-vector ⊥ primal edge"
+        α_or = dot(S_e, S_e) / Sd
+        T_e = S_e - α_or * d_e
+
+        push!(rows, i); push!(cols, i); push!(vals, α_or)
+
+        cells_for_e = _top_cells_containing(e)
+        weight = 1.0 / length(cells_for_e)
+        for c in cells_for_e
+            G = cell_grad[c]
+            cols_c = cell_edge_cols[c]
+            coef = vec(transpose(T_e) * G)
+            for (j, col) in enumerate(cols_c)
+                push!(rows, i); push!(cols, col); push!(vals, weight * coef[j])
             end
         end
     end
-    
-    return sparse(row_inds, col_inds, vals, n_dual_cells, n_cells)
+
+    return sparse(rows, cols, vals, n_edges, n_edges)
 end
 
-"""
-    cross_diffusion_correction(m::Metric{N}, mesh::Mesh{N, K}, k::Int, primal::Bool) where {N, K}
-
-Computes the cross diffusion correction term for the hodge operator to reduce
-numerical diffusion caused by non-orthogonal mesh geometry. This addresses
-spurious coupling between neighboring elements.
-"""
-function cross_diffusion_correction(m::Metric{N}, mesh::Mesh{N, K}, k::Int, primal::Bool) where {N, K}
-    if k == K+1
-        return spzeros(0,0)
+# Edges (1-cells, K=2) belonging to a primal cell, with deduplication.
+function _cell_edges(c::Cell{N}) where N
+    if c.K == 2
+        return Cell{N}[c]
     end
-    
-    comp = primal ? mesh.primal.complex : mesh.dual.complex
-    dual_comp = primal ? mesh.dual.complex : mesh.primal.complex
-    
-    n_cells = length(comp.cells[k])
-    n_dual_cells = length(dual_comp.cells[K-k+1])
-    
-    row_inds, col_inds, vals = Int[], Int[], Float64[]
-    
-    for (i, p_cell) in enumerate(comp.cells[k])
-        neighbors = get_neighboring_cells(p_cell, comp, k)
-        
-        for neighbor in neighbors
-            j_neighbor = findfirst(isequal(neighbor), comp.cells[k])
-            if j_neighbor !== nothing && j_neighbor != i
-                correction_val = compute_cross_diffusion_weight(m, mesh, p_cell, neighbor, k, primal)
-                if abs(correction_val) > 1e-12
-                    dual_idx = get_corresponding_dual_index(p_cell, dual_comp, K-k+1)
-                    if dual_idx !== nothing
-                        push!(row_inds, dual_idx)
-                        push!(col_inds, j_neighbor)
-                        push!(vals, correction_val)
-                    end
-                end
+    seen = Set{Cell{N}}()
+    function recurse(x)
+        if x.K == 2
+            push!(seen, x)
+        else
+            for ch in x.children
+                recurse(ch)
             end
         end
     end
-    
-    return sparse(row_inds, col_inds, vals, n_dual_cells, n_cells)
+    recurse(c)
+    return collect(seen)
 end
 
-"""
-    has_geometric_relationship(cell1, cell2, k::Int, K::Int)
-
-Check if two cells have a geometric relationship that warrants correction.
-"""
-function has_geometric_relationship(cell1, cell2, k::Int, K::Int)
-    if k == 1 && K-k+1 == 1
-        return length(intersect(Set(cell1.children), Set(cell2.children))) > 0
-    elseif k == 2 && K-k+1 == 1  
-        return any(child in cell2.children for child in cell1.children)
-    else
-        return false
+# Primal top-dim cells (K = N+1) that contain a given lower-dim cell.
+function _top_cells_containing(c::Cell{N}) where N
+    K = N + 1
+    if c.K == K
+        return Cell{N}[c]
     end
-end
-
-"""
-    compute_direct_gradient_weight(m::Metric{N}, mesh::Mesh{N, K}, p_cell, d_cell, k::Int, primal::Bool) where {N, K}
-
-Compute the weight for direct gradient correction between primal and dual cells.
-Uses geometric distance and volume ratios to estimate correction magnitude.
-"""
-function compute_direct_gradient_weight(m::Metric{N}, mesh::Mesh{N, K}, p_cell, d_cell, k::Int, primal::Bool) where {N, K}
-    p_vol = volume(m, mesh.primal, p_cell)
-    d_vol = volume(m, mesh.dual, d_cell)
-    
-    if p_vol < 1e-12 || d_vol < 1e-12
-        return 0.0
-    end
-    
-    orthogonality_deviation = estimate_orthogonality_deviation(m, mesh, p_cell, d_cell, k)
-    
-    correction_strength = 0.1
-    return correction_strength * orthogonality_deviation * sqrt(p_vol * d_vol) / (p_vol + d_vol)
-end
-
-"""
-    compute_cross_diffusion_weight(m::Metric{N}, mesh::Mesh{N, K}, cell1, cell2, k::Int, primal::Bool) where {N, K}
-
-Compute the weight for cross diffusion correction between neighboring cells.
-Uses shared boundary area and geometric alignment.
-"""
-function compute_cross_diffusion_weight(m::Metric{N}, mesh::Mesh{N, K}, cell1, cell2, k::Int, primal::Bool) where {N, K}
-    comp = primal ? mesh.primal : mesh.dual
-    
-    vol1 = volume(m, comp, cell1)
-    vol2 = volume(m, comp, cell2)
-    
-    if vol1 < 1e-12 || vol2 < 1e-12
-        return 0.0
-    end
-    
-    shared_measure = compute_shared_boundary_measure(cell1, cell2, k)
-    
-    if shared_measure < 1e-12
-        return 0.0
-    end
-    
-    diffusion_strength = 0.05
-    return -diffusion_strength * shared_measure * sqrt(vol1 * vol2) / (vol1 + vol2)
-end
-
-"""
-    get_neighboring_cells(cell, complex, k::Int)
-
-Get cells that share a boundary with the given cell.
-"""
-function get_neighboring_cells(cell, complex, k::Int)
-    neighbors = []
-    
-    if k > 1
-        for child in cell.children
-            for parent_key in keys(child.parents)
-                if parent_key != cell && parent_key in complex.cells[k]
-                    push!(neighbors, parent_key)
-                end
+    seen = Set{Cell{N}}()
+    function recurse(x)
+        if x.K == K
+            push!(seen, x)
+        else
+            for p in keys(x.parents)
+                recurse(p)
             end
         end
     end
-    
-    return unique(neighbors)
+    recurse(c)
+    return collect(seen)
 end
 
 """
-    get_corresponding_dual_index(p_cell, dual_complex, k::Int)
+    corrected_barycentric_hodge(m::Metric{N}, mesh::Mesh{N, K}, k::Int, primal::Bool)
 
-Find the index of the dual cell corresponding to a primal cell.
+Hodge star with non-orthogonality correction. For primal `k=2` in 2D or 3D
+(the case where centroidal-dual non-orthogonality enters the standard
+Laplacian on 0-forms), returns `nonorthogonal_hodge`. For all other
+`(k, primal)` combinations, falls back to the diagonal `barycentric_hodge`.
 """
-function get_corresponding_dual_index(p_cell, dual_complex, k::Int)
-    return findfirst(cell -> corresponds_to_cell(cell, p_cell, k), dual_complex.cells[k])
-end
-
-"""
-    corresponds_to_cell(dual_cell, primal_cell, k::Int)
-
-Check if a dual cell corresponds to a primal cell based on incidence relationships.
-"""
-function corresponds_to_cell(dual_cell, primal_cell, k::Int)
-    if k == 1
-        return length(intersect(Set(dual_cell.children), Set(primal_cell.children))) > 0
-    else
-        return true
+function corrected_barycentric_hodge(m::Metric{N}, mesh::Mesh{N, K}, k::Int,
+    primal::Bool) where {N, K}
+    if k == 2 && primal && ((N == 2 && K == 3) || (N == 3 && K == 4))
+        return nonorthogonal_hodge(m, mesh)
     end
+    return barycentric_hodge(m, mesh, k, primal)
 end
 
-"""
-    estimate_orthogonality_deviation(m::Metric{N}, mesh::Mesh{N, K}, p_cell, d_cell, k::Int) where {N, K}
-
-Estimate how much the connection between primal and dual cells deviates from orthogonality.
-"""
-function estimate_orthogonality_deviation(m::Metric{N}, mesh::Mesh{N, K}, p_cell, d_cell, k::Int) where {N, K}
-    if k == 1
-        return 0.2
-    elseif k == 2  
-        return 0.15
-    else
-        return 0.1
+# Primal edge vector with the d_0 sign convention:
+# v_positive_endpoint - v_negative_endpoint, where positive/negative is set by
+# v.parents[e] ∈ {true, false}.
+function _primal_edge_vector(e::Cell{N}) where N
+    @assert e.K == 2
+    de = zero(SVector{N, Float64})
+    for v in e.children
+        s = v.parents[e] ? 1.0 : -1.0
+        de = de + s * v.points[1].coords
     end
+    return de
 end
 
-"""
-    compute_shared_boundary_measure(cell1, cell2, k::Int)
+# Dual face area-vector for a primal edge in 2D, oriented so that S·d > 0.
+# Uses signed dual simplices [e_center, parent_center] from
+# `mesh.dual.simplices[dual(mesh, e)]`.
+function _dual_face_area_vector(mesh::Mesh{2, 3}, e::Cell{2},
+    d_e::SVector{2, Float64})
+    de_cell = dual(mesh, e)
+    elems = mesh.dual.simplices[de_cell]
 
-Compute the measure (length/area) of the shared boundary between two cells.
-"""
-function compute_shared_boundary_measure(cell1, cell2, k::Int)
-    shared_children = intersect(Set(cell1.children), Set(cell2.children))
-    return Float64(length(shared_children))
+    if length(elems) == 2
+        p1 = elems[1][1].points[2].coords
+        p2 = elems[2][1].points[2].coords
+        chord = p2 - p1
+    elseif length(elems) == 1
+        ec = elems[1][1].points[1].coords
+        pc = elems[1][1].points[2].coords
+        chord = ec - pc
+    else
+        error("edge has unexpected number of dual simplices: $(length(elems))")
+    end
+
+    S = SVector{2, Float64}(-chord[2], chord[1])
+    return dot(S, d_e) < 0 ? -S : S
+end
+
+# Dual face area-vector for a primal edge in 3D. The dual face is a (possibly
+# non-planar) polygon fan-triangulated from `e_center`; each elementary dual is
+# the triangle `[e_center, triangle_center, tet_center]`. The sign convention
+# stored in `mesh.dual.simplices` is chosen for *volume* sums and does not
+# orient cross products consistently, so each triangle's normal is independently
+# aligned with `d_e` (which is roughly perpendicular to the dual face) before
+# summing. For planar dual faces this is exact; for mildly non-planar duals
+# it gives the area vector projected onto the half-space defined by `d_e`.
+function _dual_face_area_vector(mesh::Mesh{3, 4}, e::Cell{3},
+    d_e::SVector{3, Float64})
+    de_cell = dual(mesh, e)
+    elems = mesh.dual.simplices[de_cell]
+    S = zero(SVector{3, Float64})
+    for (s, _) in elems
+        @assert length(s.points) == 3
+        v1 = s.points[2].coords - s.points[1].coords
+        v2 = s.points[3].coords - s.points[1].coords
+        cross_v = SVector{3, Float64}(
+            v1[2] * v2[3] - v1[3] * v2[2],
+            v1[3] * v2[1] - v1[1] * v2[3],
+            v1[1] * v2[2] - v1[2] * v2[1],
+        )
+        if dot(cross_v, d_e) < 0
+            cross_v = -cross_v
+        end
+        S = S + 0.5 * cross_v
+    end
+    return S
 end
 
 """

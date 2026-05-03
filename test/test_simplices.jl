@@ -1,6 +1,6 @@
 using Test, DiscreteExteriorCalculus
 const DEC = DiscreteExteriorCalculus
-using LinearAlgebra: norm
+using LinearAlgebra: norm, diag
 using Statistics: mean
 
 @testset "Point and Simplex" begin
@@ -99,6 +99,62 @@ end
         s2 = Simplex(s1.points[2:end]..., p)
         @test pairwise_delaunay(m, s1, s2) ≈ delaunay
     end
+end
+
+@testset "mixed_center: per-type circumcenter / centroid dispatch" begin
+    # On a well-centered triangulation, mixed_center reproduces the
+    # circumcenter dual exactly. On Kuhn 3D tets (every tet obtuse), it
+    # falls back to centroid for every cell, matching the centroid dual.
+    m2 = Metric(2)
+
+    # Equilateral 2D lattice: well-centered.
+    _, tcomp_eq = DEC.triangulated_lattice([1.0, 0.0], [0.5, 0.5*sqrt(3)], 4, 4)
+    orient!(tcomp_eq.complex)
+    @test well_centered(m2, tcomp_eq.complex)
+    mesh_circ = Mesh(tcomp_eq, circumcenter(m2))
+    mesh_mix  = Mesh(tcomp_eq, mixed_center(m2))
+    @test isapprox(diag(DEC.circumcenter_hodge(m2, mesh_circ, 2, true)),
+                   diag(DEC.barycentric_hodge(m2, mesh_mix, 2, true));
+                   atol=1e-12)
+
+    # Skewed 2D lattice: still well-centered, mixed_center == circumcenter.
+    _, tcomp_sk = DEC.triangulated_lattice([1.0, 0.0], [0.3, 0.85], 4, 4)
+    orient!(tcomp_sk.complex)
+    @test well_centered(m2, tcomp_sk.complex)
+    mesh_circ_sk = Mesh(tcomp_sk, circumcenter(m2))
+    mesh_mix_sk  = Mesh(tcomp_sk, mixed_center(m2))
+    @test isapprox(diag(DEC.circumcenter_hodge(m2, mesh_circ_sk, 2, true)),
+                   diag(DEC.barycentric_hodge(m2, mesh_mix_sk, 2, true));
+                   atol=1e-12)
+
+    # 3D Kuhn tets (every tet obtuse): mixed_center falls back to centroid.
+    m3 = Metric(3)
+    KUHN = ((1,2,3,7),(1,3,4,7),(1,4,8,7),(1,8,5,7),(1,5,6,7),(1,6,2,7))
+    function _kuhn_tcomp(n)
+        pts = Dict{NTuple{3,Int}, Point{3}}()
+        for i in 0:n, j in 0:n, k in 0:n
+            pts[(i,j,k)] = Point(i/n, j/n, k/n)
+        end
+        simplices = Simplex{3,4}[]
+        for i in 0:n-1, j in 0:n-1, k in 0:n-1
+            c8 = [pts[(i,j,k)], pts[(i+1,j,k)], pts[(i+1,j+1,k)], pts[(i,j+1,k)],
+                  pts[(i,j,k+1)], pts[(i+1,j,k+1)], pts[(i+1,j+1,k+1)], pts[(i,j+1,k+1)]]
+            for t in KUHN
+                push!(simplices, Simplex(c8[t[1]], c8[t[2]], c8[t[3]], c8[t[4]]))
+            end
+        end
+        return TriangulatedComplex(simplices)
+    end
+    tcomp_kuhn = _kuhn_tcomp(3)
+    orient!(tcomp_kuhn.complex)
+    @test !well_centered(m3, tcomp_kuhn.complex)
+    mesh_cent  = Mesh(tcomp_kuhn, centroid)
+    mesh_mix3  = Mesh(tcomp_kuhn, mixed_center(m3))
+    @test isapprox(diag(DEC.barycentric_hodge(m3, mesh_cent, 2, true)),
+                   diag(DEC.barycentric_hodge(m3, mesh_mix3, 2, true));
+                   atol=1e-12)
+    @test isapprox(DEC.nonorthogonal_hodge(m3, mesh_cent),
+                   DEC.nonorthogonal_hodge(m3, mesh_mix3); atol=1e-12)
 end
 
 # TODO test with other metrics
